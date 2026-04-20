@@ -4,19 +4,31 @@ import { logger } from './logger.js';
 
 interface ModelStats {
   input_tokens: number;
+  cache_creation_input_tokens: number;
+  cache_read_input_tokens: number;
   output_tokens: number;
   requests: number;
 }
 
 export interface Usage {
-  input: number;
-  output: number;
+  input_tokens: number;
+  cache_creation_input_tokens: number;
+  cache_read_input_tokens: number;
+  output_tokens: number;
 }
 
 type DailyStats = Record<string, Record<string, ModelStats>>;
 
 const statsFile = path.join(process.cwd(), 'stats.json');
 let stats: DailyStats = {};
+
+const EMPTY_STATS: ModelStats = {
+  input_tokens: 0,
+  cache_creation_input_tokens: 0,
+  cache_read_input_tokens: 0,
+  output_tokens: 0,
+  requests: 0,
+};
 
 export function loadStats(): void {
   if (!fs.existsSync(statsFile)) return;
@@ -42,27 +54,35 @@ function today(): string {
 export function recordUsage(model: string, usage: Usage): void {
   const day = today();
   if (!stats[day]) stats[day] = {};
-  if (!stats[day][model]) stats[day][model] = { input_tokens: 0, output_tokens: 0, requests: 0 };
+  if (!stats[day][model]) stats[day][model] = { ...EMPTY_STATS };
 
-  stats[day][model].input_tokens += usage.input;
-  stats[day][model].output_tokens += usage.output;
+  stats[day][model].input_tokens += usage.input_tokens;
+  stats[day][model].cache_creation_input_tokens += usage.cache_creation_input_tokens;
+  stats[day][model].cache_read_input_tokens += usage.cache_read_input_tokens;
+  stats[day][model].output_tokens += usage.output_tokens;
   stats[day][model].requests += 1;
 
   saveStats();
 }
 
 export function formatUsage(usage: Usage): string {
-  return `in=${usage.input} out=${usage.output}`;
+  const parts = [`in=${usage.input_tokens}`, `out=${usage.output_tokens}`];
+  if (usage.cache_read_input_tokens > 0) parts.push(`cache_read=${usage.cache_read_input_tokens}`);
+  if (usage.cache_creation_input_tokens > 0) parts.push(`cache_create=${usage.cache_creation_input_tokens}`);
+  return parts.join(' ');
 }
 
 export function getStats(): DailyStats {
   return stats;
 }
 
-function sumAnthropicInput(usage: any): number {
-  return (usage.input_tokens || 0)
-    + (usage.cache_creation_input_tokens || 0)
-    + (usage.cache_read_input_tokens || 0);
+function extractAnthropicUsage(usage: any): Usage {
+  return {
+    input_tokens: usage.input_tokens || 0,
+    cache_creation_input_tokens: usage.cache_creation_input_tokens || 0,
+    cache_read_input_tokens: usage.cache_read_input_tokens || 0,
+    output_tokens: usage.output_tokens || 0,
+  };
 }
 
 export function extractUsageFromResponse(body: string): Usage | null {
@@ -70,19 +90,23 @@ export function extractUsageFromResponse(body: string): Usage | null {
     const json = JSON.parse(body);
     // Anthropic format
     if (json.usage?.input_tokens != null) {
-      return { input: sumAnthropicInput(json.usage), output: json.usage.output_tokens || 0 };
+      return extractAnthropicUsage(json.usage);
     }
     // OpenAI format
     if (json.usage?.prompt_tokens != null) {
-      return { input: json.usage.prompt_tokens, output: json.usage.completion_tokens || 0 };
+      return {
+        input_tokens: json.usage.prompt_tokens || 0,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+        output_tokens: json.usage.completion_tokens || 0,
+      };
     }
   } catch { /* ignore parse errors */ }
   return null;
 }
 
 export function extractUsageFromStream(chunks: string): Usage | null {
-  let input = 0;
-  let output = 0;
+  const usage: Usage = { input_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 0 };
   let found = false;
 
   for (const line of chunks.split('\n')) {
@@ -93,24 +117,27 @@ export function extractUsageFromStream(chunks: string): Usage | null {
     try {
       const json = JSON.parse(data);
 
-      // Anthropic: message_start has input_tokens
+      // Anthropic: message_start has input usage
       if (json.type === 'message_start' && json.message?.usage != null) {
-        input = sumAnthropicInput(json.message.usage);
+        const u = extractAnthropicUsage(json.message.usage);
+        usage.input_tokens = u.input_tokens;
+        usage.cache_creation_input_tokens = u.cache_creation_input_tokens;
+        usage.cache_read_input_tokens = u.cache_read_input_tokens;
         found = true;
       }
       // Anthropic: message_delta has output_tokens
       if (json.type === 'message_delta' && json.usage?.output_tokens != null) {
-        output = json.usage.output_tokens;
+        usage.output_tokens = json.usage.output_tokens;
         found = true;
       }
       // OpenAI: last chunk may have usage
       if (json.usage?.prompt_tokens != null) {
-        input = json.usage.prompt_tokens;
-        output = json.usage.completion_tokens || 0;
+        usage.input_tokens = json.usage.prompt_tokens || 0;
+        usage.output_tokens = json.usage.completion_tokens || 0;
         found = true;
       }
     } catch { /* ignore individual parse errors */ }
   }
 
-  return found ? { input, output } : null;
+  return found ? usage : null;
 }
