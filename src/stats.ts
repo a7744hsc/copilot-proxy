@@ -8,6 +8,11 @@ interface ModelStats {
   requests: number;
 }
 
+export interface Usage {
+  input: number;
+  output: number;
+}
+
 type DailyStats = Record<string, Record<string, ModelStats>>;
 
 const statsFile = path.join(process.cwd(), 'stats.json');
@@ -34,29 +39,38 @@ function today(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-export function recordUsage(model: string, inputTokens: number, outputTokens: number): void {
+export function recordUsage(model: string, usage: Usage): void {
   const day = today();
   if (!stats[day]) stats[day] = {};
   if (!stats[day][model]) stats[day][model] = { input_tokens: 0, output_tokens: 0, requests: 0 };
 
-  stats[day][model].input_tokens += inputTokens;
-  stats[day][model].output_tokens += outputTokens;
+  stats[day][model].input_tokens += usage.input;
+  stats[day][model].output_tokens += usage.output;
   stats[day][model].requests += 1;
 
-  logger.info(`tokens: ${model} in=${inputTokens} out=${outputTokens}`);
   saveStats();
+}
+
+export function formatUsage(usage: Usage): string {
+  return `in=${usage.input} out=${usage.output}`;
 }
 
 export function getStats(): DailyStats {
   return stats;
 }
 
-export function extractUsageFromResponse(body: string): { input: number; output: number } | null {
+function sumAnthropicInput(usage: any): number {
+  return (usage.input_tokens || 0)
+    + (usage.cache_creation_input_tokens || 0)
+    + (usage.cache_read_input_tokens || 0);
+}
+
+export function extractUsageFromResponse(body: string): Usage | null {
   try {
     const json = JSON.parse(body);
     // Anthropic format
     if (json.usage?.input_tokens != null) {
-      return { input: json.usage.input_tokens, output: json.usage.output_tokens || 0 };
+      return { input: sumAnthropicInput(json.usage), output: json.usage.output_tokens || 0 };
     }
     // OpenAI format
     if (json.usage?.prompt_tokens != null) {
@@ -66,7 +80,7 @@ export function extractUsageFromResponse(body: string): { input: number; output:
   return null;
 }
 
-export function extractUsageFromStream(chunks: string): { input: number; output: number } | null {
+export function extractUsageFromStream(chunks: string): Usage | null {
   let input = 0;
   let output = 0;
   let found = false;
@@ -80,8 +94,8 @@ export function extractUsageFromStream(chunks: string): { input: number; output:
       const json = JSON.parse(data);
 
       // Anthropic: message_start has input_tokens
-      if (json.type === 'message_start' && json.message?.usage?.input_tokens != null) {
-        input = json.message.usage.input_tokens;
+      if (json.type === 'message_start' && json.message?.usage != null) {
+        input = sumAnthropicInput(json.message.usage);
         found = true;
       }
       // Anthropic: message_delta has output_tokens

@@ -190,18 +190,24 @@ export class AuthManager {
     if (!this.accessToken) throw new Error('No access token available');
 
     logger.info('Exchanging access token for Copilot token...');
-    const res = await fetch('https://api.github.com/copilot_internal/v2/token', {
-      method: 'GET',
-      headers: {
-        Accept: 'application/json',
-        Authorization: `token ${this.accessToken}`,
-        'editor-version': EDITOR_VERSION,
-        'editor-plugin-version': 'copilot-proxy/1.0',
-      },
-    });
+    let res: globalThis.Response;
+    try {
+      res = await fetch('https://api.github.com/copilot_internal/v2/token', {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+          Authorization: `token ${this.accessToken}`,
+          'editor-version': EDITOR_VERSION,
+          'editor-plugin-version': 'copilot-proxy/1.0',
+        },
+      });
+    } catch (e: any) {
+      throw new Error(`Token refresh network error: ${e.message} (${e.cause?.code || e.cause?.message || 'unknown'})`);
+    }
 
     if (!res.ok) {
       const body = await res.text();
+      logger.error(`Token refresh failed: ${res.status}`, { body });
       if (res.status === 401) {
         this.accessToken = null;
         throw new Error('GitHub access token is invalid or expired. Please re-authenticate.');
@@ -220,7 +226,7 @@ export class AuthManager {
 
   // --- Token Refresh Scheduling ---
 
-  private scheduleRefresh(): void {
+  private scheduleRefresh(retryDelay?: number): void {
     if (this.refreshTimer) {
       clearTimeout(this.refreshTimer);
       this.refreshTimer = null;
@@ -228,15 +234,24 @@ export class AuthManager {
 
     if (!this.copilotToken) return;
 
-    const now = Math.floor(Date.now() / 1000);
-    const refreshAt = this.copilotToken.expires_at - REFRESH_BUFFER_SECONDS;
-    const delaySeconds = Math.max(0, refreshAt - now);
+    let delaySeconds: number;
+    if (retryDelay != null) {
+      delaySeconds = retryDelay;
+    } else {
+      const now = Math.floor(Date.now() / 1000);
+      const refreshAt = this.copilotToken.expires_at - REFRESH_BUFFER_SECONDS;
+      delaySeconds = Math.max(0, refreshAt - now);
+    }
 
     if (delaySeconds <= 0) {
       logger.info('Token expired or expiring soon, refreshing immediately');
       this.refreshCopilotToken()
         .then(() => this.scheduleRefresh())
-        .catch((e: any) => logger.error(`Auto-refresh failed: ${e.message}`));
+        .catch((e: any) => {
+          logger.error(`Auto-refresh failed: ${e.message}`, { cause: e.cause?.message, code: e.cause?.code });
+          logger.info('Retrying token refresh in 30 seconds...');
+          this.scheduleRefresh(30);
+        });
       return;
     }
 
@@ -247,7 +262,9 @@ export class AuthManager {
         await this.refreshCopilotToken();
         this.scheduleRefresh();
       } catch (e: any) {
-        logger.error(`Auto-refresh failed: ${e.message}`);
+        logger.error(`Auto-refresh failed: ${e.message}`, { cause: e.cause?.message, code: e.cause?.code });
+        logger.info('Retrying token refresh in 30 seconds...');
+        this.scheduleRefresh(30);
       }
     }, delaySeconds * 1000);
   }

@@ -2,7 +2,7 @@ import express from 'express';
 import { AuthManager } from './auth.js';
 import { resolveModel, applyRequestOverrides, getHeaderOverrides } from './config.js';
 import { logger } from './logger.js';
-import { recordUsage, getStats, extractUsageFromResponse, extractUsageFromStream } from './stats.js';
+import { recordUsage, getStats, extractUsageFromResponse, extractUsageFromStream, formatUsage } from './stats.js';
 
 const STREAMING_TIMEOUT = 600_000;  // 10 min
 const NON_STREAMING_TIMEOUT = 300_000;  // 5 min
@@ -119,14 +119,15 @@ async function handleUpstreamResponse(
 
   if (!upstream.body) {
     const text = await upstream.text();
+    const usage = extractUsageFromResponse(text);
+    const tokenInfo = usage ? ` ${formatUsage(usage)}` : '';
     if (upstream.ok) {
-      logger.info(`← ${upstream.status} (no body)`);
+      logger.info(`← ${upstream.status} (no body)${tokenInfo}`);
     } else {
-      logger.error(`← ${upstream.status} (no body)`, { body: text });
+      logger.error(`← ${upstream.status} (no body)${tokenInfo}`, { body: text });
     }
     logger.debug('Response body', { text });
-    const usage = extractUsageFromResponse(text);
-    if (usage) recordUsage(model, usage.input, usage.output);
+    if (usage) recordUsage(model, usage);
     res.send(text);
     return;
   }
@@ -148,21 +149,24 @@ async function handleUpstreamResponse(
       logger.error(`Stream error: ${e.message}`);
     } finally {
       res.end();
-      logger.info(`← ${upstream.status} (streamed)`);
-      logger.debug('Response body', { body: chunks.join('') });
-      const usage = extractUsageFromStream(chunks.join(''));
-      if (usage) recordUsage(model, usage.input, usage.output);
+      const allChunks = chunks.join('');
+      const usage = extractUsageFromStream(allChunks);
+      const tokenInfo = usage ? ` ${formatUsage(usage)}` : '';
+      logger.info(`← ${upstream.status} (streamed)${tokenInfo}`);
+      logger.debug('Response body', { body: allChunks });
+      if (usage) recordUsage(model, usage);
     }
   } else {
     const data = await upstream.text();
+    const usage = extractUsageFromResponse(data);
+    const tokenInfo = usage ? ` ${formatUsage(usage)}` : '';
     if (upstream.ok) {
-      logger.info(`← ${upstream.status}`);
+      logger.info(`← ${upstream.status}${tokenInfo}`);
     } else {
-      logger.error(`← ${upstream.status}`, { body: data });
+      logger.error(`← ${upstream.status}${tokenInfo}`, { body: data });
     }
     logger.debug('Response body', { body: data });
-    const usage = extractUsageFromResponse(data);
-    if (usage) recordUsage(model, usage.input, usage.output);
+    if (usage) recordUsage(model, usage);
     res.send(data);
   }
 }
