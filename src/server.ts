@@ -25,6 +25,19 @@ function sanitizeTools(tools: any[] | undefined): void {
   }
 }
 
+function stripEmptyTextBlocks(body: any): void {
+  if (!Array.isArray(body?.messages)) return;
+  for (const message of body.messages) {
+    if (!Array.isArray(message?.content)) continue;
+    message.content = message.content.filter(
+      (block: any) => !(block?.type === 'text' && typeof block.text === 'string' && block.text.length === 0),
+    );
+    if (message.content.length === 0) {
+      message.content = [{ type: 'text', text: ' ' }];
+    }
+  }
+}
+
 function buildCopilotHeaders(auth: AuthManager, req: express.Request): Record<string, string> {
   const token = auth.getCopilotToken();
   if (!token) throw new Error('No Copilot token available');
@@ -103,7 +116,11 @@ async function handleUpstreamResponse(
 
   if (!upstream.body) {
     const text = await upstream.text();
-    logger.info(`← ${upstream.status} (no body)`);
+    if (upstream.ok) {
+      logger.info(`← ${upstream.status} (no body)`);
+    } else {
+      logger.error(`← ${upstream.status} (no body)`, { body: text });
+    }
     logger.debug('Response body', { text });
     res.send(text);
     return;
@@ -131,7 +148,11 @@ async function handleUpstreamResponse(
     }
   } else {
     const data = await upstream.text();
-    logger.info(`← ${upstream.status}`);
+    if (upstream.ok) {
+      logger.info(`← ${upstream.status}`);
+    } else {
+      logger.error(`← ${upstream.status}`, { body: data });
+    }
     logger.debug('Response body', { body: data });
     res.send(data);
   }
@@ -154,6 +175,7 @@ export function createServer(auth: AuthManager): express.Express {
       let body = { ...req.body };
 
       if (!body.model) {
+        logger.error('← 400 Missing required field: model');
         return res.status(400).json({
           type: 'error',
           error: { type: 'invalid_request_error', message: 'Missing required field: model' },
@@ -172,6 +194,7 @@ export function createServer(auth: AuthManager): express.Express {
       // Clean non-standard fields before forwarding
       delete body.context_management;
       sanitizeTools(body.tools);
+      stripEmptyTextBlocks(body);
 
       const headers = buildCopilotHeaders(auth, req);
       const isStreaming = body.stream === true;
@@ -218,6 +241,40 @@ export function createServer(auth: AuthManager): express.Express {
 
   app.post('/v1/chat/completions', handleOpenAIRequest);
   app.post('/chat/completions', handleOpenAIRequest);
+
+  // --- Models route ---
+  app.get('/v1/models', async (_req, res) => {
+    try {
+      const apiBase = auth.getCopilotApiBase();
+      const token = auth.getCopilotToken();
+      if (!token) throw new Error('No Copilot token available');
+
+      const overrides = getHeaderOverrides();
+      logger.info('→ GET /models');
+      const upstream = await fetch(`${apiBase}/models`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          ...overrides,
+        },
+      });
+
+      const data = await upstream.text();
+      if (upstream.ok) {
+        logger.info(`← ${upstream.status}`);
+      } else {
+        logger.error(`← ${upstream.status}`, { body: data });
+      }
+      logger.debug('Response body', { body: data });
+
+      res.status(upstream.status);
+      const ct = upstream.headers.get('content-type');
+      if (ct) res.setHeader('content-type', ct);
+      res.send(data);
+    } catch (e: any) {
+      logger.error(`Models handler error: ${e.message}`);
+      res.status(500).json({ error: { message: e.message, type: 'server_error' } });
+    }
+  });
 
   return app;
 }
