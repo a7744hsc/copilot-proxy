@@ -25,6 +25,7 @@ npm start          # PORT=5000 by default
 
 ## Usage
 
+**Bash:**
 ```bash
 # Set port and log level
 PORT=5001 LOG_LEVEL=debug npm start
@@ -36,11 +37,31 @@ curl http://localhost:5001/v1/messages \
   -d '{"model":"claude-opus-4-6","max_tokens":50,"messages":[{"role":"user","content":"hi"}]}'
 ```
 
+**PowerShell:**
+```powershell
+# Set port and log level
+$env:PORT = "5001"; $env:LOG_LEVEL = "debug"; npm start
+
+# Test
+Invoke-RestMethod http://localhost:5001/v1/messages -Method POST `
+  -ContentType "application/json" `
+  -Headers @{ "anthropic-version" = "2023-06-01" } `
+  -Body '{"model":"claude-opus-4-6","max_tokens":50,"messages":[{"role":"user","content":"hi"}]}'
+```
+
 ## Use with Claude Code
 
+**Bash:**
 ```bash
 export ANTHROPIC_BASE_URL=http://localhost:5001
 export ANTHROPIC_AUTH_TOKEN=dummy
+claude
+```
+
+**PowerShell:**
+```powershell
+$env:ANTHROPIC_BASE_URL = "http://localhost:5001"
+$env:ANTHROPIC_AUTH_TOKEN = "dummy"
 claude
 ```
 
