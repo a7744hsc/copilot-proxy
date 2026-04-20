@@ -1,0 +1,13 @@
+{
+  "models": {
+    "claude-opus-4-7": "claude-opus-4.6-1m"
+  },
+  "requestOverrides": {
+    "anthropic": {},
+    "openai": {}
+  },
+  "headerOverrides": {
+    "editor-version": "vscode/1.103.1",
+    "Copilot-Integration-Id": "vscode-chat"
+  }
+}
