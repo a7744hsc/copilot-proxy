@@ -13,10 +13,8 @@ class Logger {
     const env = (process.env.LOG_LEVEL || 'info').toLowerCase() as LogLevel;
     this.level = LEVELS[env] ?? LEVELS.info;
 
-    if (this.level === LEVELS.debug) {
-      const logFile = path.join(process.cwd(), 'debug.log');
-      this.logStream = fs.createWriteStream(logFile, { flags: 'a' });
-    }
+    const logFile = path.join(process.cwd(), 'proxy.log');
+    this.logStream = fs.createWriteStream(logFile, { flags: 'a' });
   }
 
   debug(msg: string, meta?: object) { this.log('debug', msg, meta); }
