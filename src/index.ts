@@ -2,12 +2,14 @@ import { AuthManager } from './auth.js';
 import { loadConfig } from './config.js';
 import { createServer } from './server.js';
 import { logger } from './logger.js';
+import { loadStats } from './stats.js';
 
 const PORT = parseInt(process.env.PORT || '5000', 10);
 
 async function main() {
   // Load config
   loadConfig(process.env.CONFIG_PATH);
+  loadStats();
   const auth = new AuthManager();
 
   // Authenticate (loads tokens or starts device flow)

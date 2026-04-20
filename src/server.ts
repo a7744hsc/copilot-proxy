@@ -2,6 +2,7 @@ import express from 'express';
 import { AuthManager } from './auth.js';
 import { resolveModel, applyRequestOverrides, getHeaderOverrides } from './config.js';
 import { logger } from './logger.js';
+import { recordUsage, getStats, extractUsageFromResponse, extractUsageFromStream } from './stats.js';
 
 const STREAMING_TIMEOUT = 600_000;  // 10 min
 const NON_STREAMING_TIMEOUT = 300_000;  // 5 min
@@ -67,6 +68,7 @@ async function forwardRequest(
   headers: Record<string, string>,
   isStreaming: boolean,
   res: express.Response,
+  model: string,
 ): Promise<void> {
   const apiBase = auth.getCopilotApiBase();
   const url = `${apiBase}${targetPath}`;
@@ -96,16 +98,17 @@ async function forwardRequest(
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(timeout),
     });
-    return handleUpstreamResponse(retry, res, isStreaming);
+    return handleUpstreamResponse(retry, res, isStreaming, model);
   }
 
-  return handleUpstreamResponse(upstream, res, isStreaming);
+  return handleUpstreamResponse(upstream, res, isStreaming, model);
 }
 
 async function handleUpstreamResponse(
   upstream: Response,
   res: express.Response,
   isStreaming: boolean,
+  model: string,
 ): Promise<void> {
   res.status(upstream.status);
   const forwardHeaders = ['content-type', 'x-request-id'];
@@ -122,6 +125,8 @@ async function handleUpstreamResponse(
       logger.error(`← ${upstream.status} (no body)`, { body: text });
     }
     logger.debug('Response body', { text });
+    const usage = extractUsageFromResponse(text);
+    if (usage) recordUsage(model, usage.input, usage.output);
     res.send(text);
     return;
   }
@@ -145,6 +150,8 @@ async function handleUpstreamResponse(
       res.end();
       logger.info(`← ${upstream.status} (streamed)`);
       logger.debug('Response body', { body: chunks.join('') });
+      const usage = extractUsageFromStream(chunks.join(''));
+      if (usage) recordUsage(model, usage.input, usage.output);
     }
   } else {
     const data = await upstream.text();
@@ -154,6 +161,8 @@ async function handleUpstreamResponse(
       logger.error(`← ${upstream.status}`, { body: data });
     }
     logger.debug('Response body', { body: data });
+    const usage = extractUsageFromResponse(data);
+    if (usage) recordUsage(model, usage.input, usage.output);
     res.send(data);
   }
 }
@@ -199,7 +208,7 @@ export function createServer(auth: AuthManager): express.Express {
       const headers = buildCopilotHeaders(auth, req);
       const isStreaming = body.stream === true;
 
-      await forwardRequest(auth, '/v1/messages', body, headers, isStreaming, res);
+      await forwardRequest(auth, '/v1/messages', body, headers, isStreaming, res, body.model);
     } catch (e: any) {
       logger.error(`Anthropic handler error: ${e.message}`);
       res.status(500).json({
@@ -230,7 +239,7 @@ export function createServer(auth: AuthManager): express.Express {
       const headers = buildCopilotHeaders(auth, req);
       const isStreaming = body.stream === true;
 
-      await forwardRequest(auth, '/chat/completions', body, headers, isStreaming, res);
+      await forwardRequest(auth, '/chat/completions', body, headers, isStreaming, res, body.model || 'unknown');
     } catch (e: any) {
       logger.error(`OpenAI handler error: ${e.message}`);
       res.status(500).json({
@@ -274,6 +283,11 @@ export function createServer(auth: AuthManager): express.Express {
       logger.error(`Models handler error: ${e.message}`);
       res.status(500).json({ error: { message: e.message, type: 'server_error' } });
     }
+  });
+
+  // --- Stats route ---
+  app.get('/stats', (_req, res) => {
+    res.json(getStats());
   });
 
   return app;
