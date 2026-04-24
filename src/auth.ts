@@ -1,6 +1,5 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import * as os from 'node:os';
 import { logger } from './logger.js';
 
 const CLIENT_ID = 'Iv1.b507a08c87ecfe98';
@@ -34,7 +33,7 @@ export class AuthManager {
   private tokenDir: string;
 
   constructor(tokenDir?: string) {
-    this.tokenDir = tokenDir || path.join(os.homedir(), '.config', 'llm-proxy', 'github_copilot');
+    this.tokenDir = tokenDir || path.join(process.cwd(), '.tokens');
   }
 
   // --- Public API ---
@@ -68,10 +67,7 @@ export class AuthManager {
   }
 
   getCopilotToken(): string | null {
-    if (this.copilotToken && this.isCopilotTokenValid()) {
-      return this.copilotToken.token;
-    }
-    return null;
+    return this.copilotToken?.token || null;
   }
 
   getCopilotApiBase(): string {
