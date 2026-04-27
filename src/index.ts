@@ -1,3 +1,4 @@
+import * as net from 'node:net';
 import { AuthManager } from './auth.js';
 import { loadConfig } from './config.js';
 import { createServer } from './server.js';
@@ -5,8 +6,29 @@ import { logger } from './logger.js';
 import { loadStats } from './stats.js';
 
 const PORT = parseInt(process.env.PORT || '5000', 10);
+const HOST = process.env.HOST || '127.0.0.1';
+
+function checkPort(port: number, host: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const tester = net.createServer()
+      .once('error', (err: NodeJS.ErrnoException) => {
+        if (err.code === 'EADDRINUSE') {
+          reject(new Error(`Port ${port} is already in use. Stop the existing process or set a different PORT environment variable.`));
+        } else {
+          reject(err);
+        }
+      })
+      .once('listening', () => {
+        tester.close(() => resolve());
+      })
+      .listen(port, host);
+  });
+}
 
 async function main() {
+  // Check port availability before doing anything else
+  await checkPort(PORT, HOST);
+
   // Load config
   loadConfig(process.env.CONFIG_PATH);
   loadStats();
@@ -21,10 +43,10 @@ async function main() {
 
   // Start server
   const app = createServer(auth);
-  const server = app.listen(PORT);
+  const server = app.listen(PORT, HOST);
 
   server.on('listening', () => {
-    logger.info(`Copilot proxy listening on http://localhost:${PORT}`);
+    logger.info(`Copilot proxy listening on http://${HOST}:${PORT}`);
     logger.info(`API base: ${auth.getCopilotApiBase()}`);
   });
 

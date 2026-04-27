@@ -28,7 +28,7 @@ npm start          # PORT=5000 by default
 **Bash:**
 ```bash
 # Set port and log level
-PORT=5001 LOG_LEVEL=debug npm start
+PORT=5000 LOG_LEVEL=debug npm start
 
 # Test
 curl http://localhost:5001/v1/messages \
@@ -40,7 +40,7 @@ curl http://localhost:5001/v1/messages \
 **PowerShell:**
 ```powershell
 # Set port and log level
-$env:PORT = "5001"; $env:LOG_LEVEL = "debug"; npm start
+$env:PORT = "5000"; $env:LOG_LEVEL = "debug"; npm start
 
 # Test
 Invoke-RestMethod http://localhost:5001/v1/messages -Method POST `
