@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import * as crypto from 'node:crypto';
 
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
@@ -14,7 +15,11 @@ class Logger {
     this.level = LEVELS[env] ?? LEVELS.info;
 
     const logFile = path.join(process.cwd(), 'proxy.log');
-    this.logStream = fs.createWriteStream(logFile, { flags: 'a' });
+    const oldLogFile = path.join(process.cwd(), 'proxy.log.old');
+    if (fs.existsSync(logFile)) {
+      fs.renameSync(logFile, oldLogFile);
+    }
+    this.logStream = fs.createWriteStream(logFile, { flags: 'w' });
   }
 
   debug(msg: string, meta?: object) { this.log('debug', msg, meta); }
@@ -36,3 +41,7 @@ class Logger {
 }
 
 export const logger = new Logger();
+
+export function generateRequestId(): string {
+  return crypto.randomBytes(4).toString('hex');
+}

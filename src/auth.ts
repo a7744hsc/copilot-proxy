@@ -183,7 +183,13 @@ export class AuthManager {
   // --- Token Exchange ---
 
   private async refreshCopilotToken(): Promise<void> {
-    if (!this.accessToken) throw new Error('No access token available');
+    if (!this.accessToken) {
+      logger.warn('No access token in memory, attempting to reload from disk...');
+      const reloaded = await this.tryReloadAccessToken();
+      if (!reloaded) {
+        throw new Error('No access token available (not in memory or on disk)');
+      }
+    }
 
     logger.info('Exchanging access token for Copilot token...');
     let res: globalThis.Response;
@@ -205,8 +211,12 @@ export class AuthManager {
       const body = await res.text();
       logger.error(`Token refresh failed: ${res.status}`, { body });
       if (res.status === 401) {
-        this.accessToken = null;
-        throw new Error('GitHub access token is invalid or expired. Please re-authenticate.');
+        logger.warn('GitHub access token rejected (401). Attempting to reload from disk...');
+        const reloaded = await this.tryReloadAccessToken();
+        if (!reloaded) {
+          logger.error('No valid access token on disk. Re-authentication required (restart proxy).');
+        }
+        throw new Error('GitHub access token rejected (401).');
       }
       if (res.status === 403) {
         throw new Error('Access denied. Ensure you have an active GitHub Copilot subscription.');
@@ -217,7 +227,7 @@ export class AuthManager {
     this.copilotToken = (await res.json()) as CopilotToken;
     const expiresAt = new Date(this.copilotToken.expires_at * 1000);
     logger.info(`Copilot token obtained, expires at: ${expiresAt.toISOString()}`);
-    await this.saveTokens();
+    this.saveCopilotToken();
   }
 
   // --- Token Refresh Scheduling ---
@@ -286,6 +296,22 @@ export class AuthManager {
     }
   }
 
+  private saveCopilotToken(): void {
+    try {
+      if (!fs.existsSync(this.tokenDir)) {
+        fs.mkdirSync(this.tokenDir, { recursive: true, mode: 0o700 });
+      }
+      if (this.copilotToken) {
+        const p = path.join(this.tokenDir, 'api-key.json');
+        fs.writeFileSync(p, JSON.stringify(this.copilotToken, null, 2), { encoding: 'utf-8', mode: 0o600 });
+        logger.info(`Saved api-key.json to ${this.tokenDir}`);
+      }
+    } catch (e: any) {
+      logger.error(`Failed to save copilot token: ${e.message}`);
+      throw e;
+    }
+  }
+
   private async saveTokens(): Promise<void> {
     try {
       if (!fs.existsSync(this.tokenDir)) {
@@ -301,7 +327,8 @@ export class AuthManager {
         fs.writeFileSync(p, JSON.stringify(this.copilotToken, null, 2), { encoding: 'utf-8', mode: 0o600 });
       }
 
-      logger.info(`Tokens saved to ${this.tokenDir}`);
+      const saved = [this.accessToken ? 'access-token' : '', this.copilotToken ? 'api-key.json' : ''].filter(Boolean).join(', ');
+      logger.info(`Saved ${saved} to ${this.tokenDir}`);
     } catch (e: any) {
       logger.error(`Failed to save tokens: ${e.message}`);
       throw e;
@@ -314,6 +341,25 @@ export class AuthManager {
     if (!this.copilotToken) return false;
     const now = Math.floor(Date.now() / 1000);
     return this.copilotToken.expires_at > now;
+  }
+
+  private async tryReloadAccessToken(): Promise<boolean> {
+    try {
+      const accessTokenPath = path.join(this.tokenDir, 'access-token');
+      if (fs.existsSync(accessTokenPath)) {
+        const token = fs.readFileSync(accessTokenPath, 'utf-8').trim();
+        if (token) {
+          this.accessToken = token;
+          logger.info('Access token reloaded from disk');
+          return true;
+        }
+      }
+      logger.warn('No access token file found on disk');
+      return false;
+    } catch (e: any) {
+      logger.error(`Failed to reload access token from disk: ${e.message}`);
+      return false;
+    }
   }
 
   private sleep(ms: number): Promise<void> {

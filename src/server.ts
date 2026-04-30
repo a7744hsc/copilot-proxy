@@ -1,7 +1,7 @@
 import express from 'express';
 import { AuthManager } from './auth.js';
 import { resolveModel, applyRequestOverrides, getHeaderOverrides } from './config.js';
-import { logger } from './logger.js';
+import { logger, generateRequestId } from './logger.js';
 import { recordUsage, getStats, extractUsageFromResponse, extractUsageFromStream, formatUsage } from './stats.js';
 
 const STREAMING_TIMEOUT = 600_000;  // 10 min
@@ -69,16 +69,17 @@ async function forwardRequest(
   isStreaming: boolean,
   res: express.Response,
   model: string,
+  reqId: string,
 ): Promise<void> {
   const apiBase = auth.getCopilotApiBase();
   const url = `${apiBase}${targetPath}`;
   const timeout = isStreaming ? STREAMING_TIMEOUT : NON_STREAMING_TIMEOUT;
 
-  logger.info(`→ ${body.model} ${targetPath}`, { streaming: isStreaming });
-  logger.debug('Request headers', Object.fromEntries(Object.entries(headers).map(([k, v]) =>
+  logger.info(`[${reqId}] → ${body.model} ${targetPath}`, { streaming: isStreaming });
+  logger.debug(`[${reqId}] Request headers`, Object.fromEntries(Object.entries(headers).map(([k, v]) =>
     k.toLowerCase() === 'authorization' ? [k, v.slice(0, 20) + '...'] : [k, v]
   )));
-  logger.debug('Request body', body);
+  logger.debug(`[${reqId}] Request body`, body);
 
   const upstream = await fetch(url, {
     method: 'POST',
@@ -89,7 +90,7 @@ async function forwardRequest(
 
   // 401 → refresh and retry once
   if (upstream.status === 401) {
-    logger.warn('Copilot returned 401, refreshing token and retrying...');
+    logger.warn(`[${reqId}] Copilot returned 401, refreshing token and retrying...`);
     await auth.forceRefresh();
     const newHeaders = { ...headers, Authorization: `Bearer ${auth.getCopilotToken()}` };
     const retry = await fetch(url, {
@@ -98,10 +99,10 @@ async function forwardRequest(
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(timeout),
     });
-    return handleUpstreamResponse(retry, res, isStreaming, model);
+    return handleUpstreamResponse(retry, res, isStreaming, model, reqId);
   }
 
-  return handleUpstreamResponse(upstream, res, isStreaming, model);
+  return handleUpstreamResponse(upstream, res, isStreaming, model, reqId);
 }
 
 async function handleUpstreamResponse(
@@ -109,6 +110,7 @@ async function handleUpstreamResponse(
   res: express.Response,
   isStreaming: boolean,
   model: string,
+  reqId: string,
 ): Promise<void> {
   res.status(upstream.status);
   const forwardHeaders = ['content-type', 'x-request-id'];
@@ -122,11 +124,11 @@ async function handleUpstreamResponse(
     const usage = extractUsageFromResponse(text);
     const tokenInfo = usage ? ` ${formatUsage(usage)}` : '';
     if (upstream.ok) {
-      logger.info(`← ${upstream.status} (no body)${tokenInfo}`);
+      logger.info(`[${reqId}] ← ${upstream.status} (no body)${tokenInfo}`);
     } else {
-      logger.error(`← ${upstream.status} (no body)${tokenInfo}`, { body: text });
+      logger.error(`[${reqId}] ← ${upstream.status} (no body)${tokenInfo}`, { body: text });
     }
-    logger.debug('Response body', { text });
+    logger.debug(`[${reqId}] Response body`, { text });
     if (usage) recordUsage(model, usage);
     res.send(text);
     return;
@@ -146,14 +148,14 @@ async function handleUpstreamResponse(
         res.write(value);
       }
     } catch (e: any) {
-      logger.error(`Stream error: ${e.message}`);
+      logger.error(`[${reqId}] Stream error: ${e.message}`);
     } finally {
       res.end();
       const allChunks = chunks.join('');
       const usage = extractUsageFromStream(allChunks);
       const tokenInfo = usage ? ` ${formatUsage(usage)}` : '';
-      logger.info(`← ${upstream.status} (streamed)${tokenInfo}`);
-      logger.debug('Response body', { body: allChunks });
+      logger.info(`[${reqId}] ← ${upstream.status} (streamed)${tokenInfo}`);
+      logger.debug(`[${reqId}] Response body`, { body: allChunks });
       if (usage) recordUsage(model, usage);
     }
   } else {
@@ -161,11 +163,11 @@ async function handleUpstreamResponse(
     const usage = extractUsageFromResponse(data);
     const tokenInfo = usage ? ` ${formatUsage(usage)}` : '';
     if (upstream.ok) {
-      logger.info(`← ${upstream.status}${tokenInfo}`);
+      logger.info(`[${reqId}] ← ${upstream.status}${tokenInfo}`);
     } else {
-      logger.error(`← ${upstream.status}${tokenInfo}`, { body: data });
+      logger.error(`[${reqId}] ← ${upstream.status}${tokenInfo}`, { body: data });
     }
-    logger.debug('Response body', { body: data });
+    logger.debug(`[${reqId}] Response body`, { body: data });
     if (usage) recordUsage(model, usage);
     res.send(data);
   }
@@ -184,11 +186,12 @@ export function createServer(auth: AuthManager): express.Express {
 
   // --- Anthropic routes ---
   const handleAnthropicRequest = async (req: express.Request, res: express.Response) => {
+    const reqId = generateRequestId();
     try {
       let body = { ...req.body };
 
       if (!body.model) {
-        logger.error('← 400 Missing required field: model');
+        logger.error(`[${reqId}] ← 400 Missing required field: model`);
         return res.status(400).json({
           type: 'error',
           error: { type: 'invalid_request_error', message: 'Missing required field: model' },
@@ -198,7 +201,7 @@ export function createServer(auth: AuthManager): express.Express {
       const originalModel = body.model;
       body.model = resolveModel(body.model);
       if (originalModel !== body.model) {
-        logger.debug(`Model: ${originalModel} → ${body.model}`);
+        logger.debug(`[${reqId}] Model: ${originalModel} → ${body.model}`);
       }
 
       // Apply config overrides to request body
@@ -212,9 +215,9 @@ export function createServer(auth: AuthManager): express.Express {
       const headers = buildCopilotHeaders(auth, req);
       const isStreaming = body.stream === true;
 
-      await forwardRequest(auth, '/v1/messages', body, headers, isStreaming, res, body.model);
+      await forwardRequest(auth, '/v1/messages', body, headers, isStreaming, res, body.model, reqId);
     } catch (e: any) {
-      logger.error(`Anthropic handler error: ${e.message}`);
+      logger.error(`[${reqId}] Anthropic handler error: ${e.message}`);
       res.status(500).json({
         type: 'error',
         error: { type: 'server_error', message: e.message },
@@ -227,6 +230,7 @@ export function createServer(auth: AuthManager): express.Express {
 
   // --- OpenAI routes ---
   const handleOpenAIRequest = async (req: express.Request, res: express.Response) => {
+    const reqId = generateRequestId();
     try {
       let body = { ...req.body };
 
@@ -234,7 +238,7 @@ export function createServer(auth: AuthManager): express.Express {
         const originalModel = body.model;
         body.model = resolveModel(body.model);
         if (originalModel !== body.model) {
-          logger.debug(`Model: ${originalModel} → ${body.model}`);
+          logger.debug(`[${reqId}] Model: ${originalModel} → ${body.model}`);
         }
       }
 
@@ -243,9 +247,9 @@ export function createServer(auth: AuthManager): express.Express {
       const headers = buildCopilotHeaders(auth, req);
       const isStreaming = body.stream === true;
 
-      await forwardRequest(auth, '/chat/completions', body, headers, isStreaming, res, body.model || 'unknown');
+      await forwardRequest(auth, '/chat/completions', body, headers, isStreaming, res, body.model || 'unknown', reqId);
     } catch (e: any) {
-      logger.error(`OpenAI handler error: ${e.message}`);
+      logger.error(`[${reqId}] OpenAI handler error: ${e.message}`);
       res.status(500).json({
         error: { message: e.message, type: 'server_error' },
       });
@@ -254,6 +258,37 @@ export function createServer(auth: AuthManager): express.Express {
 
   app.post('/v1/chat/completions', handleOpenAIRequest);
   app.post('/chat/completions', handleOpenAIRequest);
+
+  // --- Responses API routes ---
+  const handleResponsesRequest = async (req: express.Request, res: express.Response) => {
+    const reqId = generateRequestId();
+    try {
+      let body = { ...req.body };
+
+      if (body.model) {
+        const originalModel = body.model;
+        body.model = resolveModel(body.model);
+        if (originalModel !== body.model) {
+          logger.debug(`[${reqId}] Model: ${originalModel} → ${body.model}`);
+        }
+      }
+
+      body = applyRequestOverrides(body, 'openai') as any;
+
+      const headers = buildCopilotHeaders(auth, req);
+      const isStreaming = body.stream === true;
+
+      await forwardRequest(auth, '/responses', body, headers, isStreaming, res, body.model || 'unknown', reqId);
+    } catch (e: any) {
+      logger.error(`[${reqId}] Responses handler error: ${e.message}`);
+      res.status(500).json({
+        error: { message: e.message, type: 'server_error' },
+      });
+    }
+  };
+
+  app.post('/v1/responses', handleResponsesRequest);
+  app.post('/responses', handleResponsesRequest);
 
   // --- Models route ---
   app.get('/v1/models', async (_req, res) => {

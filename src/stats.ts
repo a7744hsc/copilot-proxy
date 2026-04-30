@@ -136,6 +136,12 @@ export function extractUsageFromStream(chunks: string): Usage | null {
         usage.output_tokens = json.usage.completion_tokens || 0;
         found = true;
       }
+      // Responses API: response.completed event has response.usage
+      if (json.type === 'response.completed' && json.response?.usage != null) {
+        usage.input_tokens = json.response.usage.input_tokens || 0;
+        usage.output_tokens = json.response.usage.output_tokens || 0;
+        found = true;
+      }
     } catch { /* ignore individual parse errors */ }
   }
 
