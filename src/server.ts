@@ -1,8 +1,8 @@
 import express from 'express';
 import { AuthManager } from './auth.js';
 import { resolveModel, applyRequestOverrides, getHeaderOverrides } from './config.js';
-import { logger, generateRequestId } from './logger.js';
-import { recordUsage, getStats, extractUsageFromResponse, extractUsageFromStream, formatUsage } from './stats.js';
+import { logger, generateRequestId, formatDuration } from './logger.js';
+import { recordUsage, getStats, extractUsageFromResponse, StreamUsageAccumulator, formatUsage } from './stats.js';
 
 const STREAMING_TIMEOUT = 600_000;  // 10 min
 const NON_STREAMING_TIMEOUT = 300_000;  // 5 min
@@ -89,6 +89,7 @@ async function forwardRequest(
   const apiBase = auth.getCopilotApiBase();
   const url = `${apiBase}${targetPath}`;
   const timeout = isStreaming ? STREAMING_TIMEOUT : NON_STREAMING_TIMEOUT;
+  const startTime = Date.now();
 
   const requestBody = JSON.stringify(body);
   const reqChars = requestBody.length;
@@ -119,10 +120,10 @@ async function forwardRequest(
       body: requestBody,
       signal: AbortSignal.timeout(timeout),
     });
-    return handleUpstreamResponse(retry, res, isStreaming, model, reqId, reqChars);
+    return handleUpstreamResponse(retry, res, isStreaming, model, reqId, reqChars, startTime);
   }
 
-  return handleUpstreamResponse(upstream, res, isStreaming, model, reqId, reqChars);
+  return handleUpstreamResponse(upstream, res, isStreaming, model, reqId, reqChars, startTime);
 }
 
 async function handleUpstreamResponse(
@@ -132,6 +133,7 @@ async function handleUpstreamResponse(
   model: string,
   reqId: string,
   reqChars: number,
+  startTime: number,
 ): Promise<void> {
   res.status(upstream.status);
   const forwardHeaders = ['content-type', 'x-request-id'];
@@ -144,7 +146,7 @@ async function handleUpstreamResponse(
     const text = await upstream.text();
     const usage = extractUsageFromResponse(text);
     const tokenInfo = usage ? ` ${formatUsage(usage)}` : '';
-    const sizeInfo = ` req=${reqChars} resp=${text.length}`;
+    const sizeInfo = ` req=${reqChars} resp=${text.length} dur=${formatDuration(Date.now() - startTime)}`;
     if (upstream.ok) {
       logger.info(`[${reqId}] ← ${upstream.status} (no body)${tokenInfo}${sizeInfo}`);
     } else {
@@ -160,32 +162,36 @@ async function handleUpstreamResponse(
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     const reader = upstream.body.getReader();
-    const chunks: string[] = [];
+    const accumulator = new StreamUsageAccumulator();
+    const debugChunks: string[] | null = logger.isDebugEnabled() ? [] : null;
+    let respBytes = 0;
     try {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+        respBytes += value.byteLength;
         const chunk = Buffer.from(value).toString('utf-8');
-        chunks.push(chunk);
+        accumulator.addChunk(chunk);
+        if (debugChunks) debugChunks.push(chunk);
         res.write(value);
       }
     } catch (e: any) {
       logger.error(`[${reqId}] Stream error: ${e.message}`);
     } finally {
       res.end();
-      const allChunks = chunks.join('');
-      const usage = extractUsageFromStream(allChunks);
+      accumulator.flush();
+      const usage = accumulator.getUsage();
       const tokenInfo = usage ? ` ${formatUsage(usage)}` : '';
-      const sizeInfo = ` req=${reqChars} resp=${allChunks.length}`;
+      const sizeInfo = ` req=${reqChars} resp=${respBytes} dur=${formatDuration(Date.now() - startTime)}`;
       logger.info(`[${reqId}] ← ${upstream.status} (streamed)${tokenInfo}${sizeInfo}`);
-      logger.debug(`[${reqId}] Response body`, { body: allChunks });
+      if (debugChunks) logger.debug(`[${reqId}] Response body`, { body: debugChunks.join('') });
       if (usage) recordUsage(model, usage);
     }
   } else {
     const data = await upstream.text();
     const usage = extractUsageFromResponse(data);
     const tokenInfo = usage ? ` ${formatUsage(usage)}` : '';
-    const sizeInfo = ` req=${reqChars} resp=${data.length}`;
+    const sizeInfo = ` req=${reqChars} resp=${data.length} dur=${formatDuration(Date.now() - startTime)}`;
     if (upstream.ok) {
       logger.info(`[${reqId}] ← ${upstream.status}${tokenInfo}${sizeInfo}`);
     } else {

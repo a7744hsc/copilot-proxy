@@ -127,56 +127,90 @@ export function extractUsageFromResponse(body: string): Usage | null {
 }
 
 export function extractUsageFromStream(chunks: string): Usage | null {
-  const usage: Usage = { input_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 0 };
-  let found = false;
-  let thinkChars = 0;
-  let thinkBlocks = 0;
+  const acc = new StreamUsageAccumulator();
+  acc.addChunk(chunks);
+  acc.flush();
+  return acc.getUsage();
+}
 
-  for (const line of chunks.split('\n')) {
-    if (!line.startsWith('data: ')) continue;
-    const data = line.slice(6).trim();
-    if (data === '[DONE]') continue;
+export class StreamUsageAccumulator {
+  private buffer = '';
+  private usage: Usage = { input_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 0 };
+  private found = false;
+  private thinkChars = 0;
+  private thinkBlocks = 0;
 
-    try {
-      const json = JSON.parse(data);
+  addChunk(chunk: string): void {
+    this.buffer += chunk;
+    let idx;
+    // SSE events are separated by blank line ("\n\n"). Process each complete event and drop it.
+    while ((idx = this.buffer.indexOf('\n\n')) !== -1) {
+      const block = this.buffer.slice(0, idx);
+      this.buffer = this.buffer.slice(idx + 2);
+      this.processBlock(block);
+    }
+  }
+
+  // Process whatever is left in the buffer (in case the stream ended without a trailing blank line)
+  flush(): void {
+    if (this.buffer.length > 0) {
+      this.processBlock(this.buffer);
+      this.buffer = '';
+    }
+  }
+
+  getUsage(): Usage | null {
+    if (this.thinkBlocks > 0) this.usage.thinking_blocks = this.thinkBlocks;
+    if (this.thinkChars > 0) this.usage.thinking_chars = this.thinkChars;
+    return this.found ? this.usage : null;
+  }
+
+  private processBlock(block: string): void {
+    for (const line of block.split('\n')) {
+      if (!line.startsWith('data: ')) continue;
+      const data = line.slice(6).trim();
+      if (data === '[DONE]') continue;
+
+      let json: any;
+      try {
+        json = JSON.parse(data);
+      } catch {
+        continue;
+      }
 
       // Anthropic: message_start has input usage
       if (json.type === 'message_start' && json.message?.usage != null) {
         const u = extractAnthropicUsage(json.message.usage);
-        usage.input_tokens = u.input_tokens;
-        usage.cache_creation_input_tokens = u.cache_creation_input_tokens;
-        usage.cache_read_input_tokens = u.cache_read_input_tokens;
-        found = true;
+        this.usage.input_tokens = u.input_tokens;
+        this.usage.cache_creation_input_tokens = u.cache_creation_input_tokens;
+        this.usage.cache_read_input_tokens = u.cache_read_input_tokens;
+        this.found = true;
       }
       // Anthropic: message_delta has output_tokens
       if (json.type === 'message_delta' && json.usage?.output_tokens != null) {
-        usage.output_tokens = json.usage.output_tokens;
-        found = true;
+        this.usage.output_tokens = json.usage.output_tokens;
+        this.found = true;
       }
       // Anthropic: count thinking content blocks
       if (json.type === 'content_block_start' && json.content_block?.type === 'thinking') {
-        thinkBlocks += 1;
+        this.thinkBlocks += 1;
       }
       // Anthropic: thinking_delta carries the streamed thinking text
       if (json.type === 'content_block_delta' && json.delta?.type === 'thinking_delta' && typeof json.delta.thinking === 'string') {
-        thinkChars += json.delta.thinking.length;
+        this.thinkChars += json.delta.thinking.length;
       }
       // OpenAI: last chunk may have usage
       if (json.usage?.prompt_tokens != null) {
-        usage.input_tokens = json.usage.prompt_tokens || 0;
-        usage.output_tokens = json.usage.completion_tokens || 0;
-        found = true;
+        this.usage.input_tokens = json.usage.prompt_tokens || 0;
+        this.usage.output_tokens = json.usage.completion_tokens || 0;
+        this.found = true;
       }
       // Responses API: response.completed event has response.usage
       if (json.type === 'response.completed' && json.response?.usage != null) {
-        usage.input_tokens = json.response.usage.input_tokens || 0;
-        usage.output_tokens = json.response.usage.output_tokens || 0;
-        found = true;
+        this.usage.input_tokens = json.response.usage.input_tokens || 0;
+        this.usage.output_tokens = json.response.usage.output_tokens || 0;
+        this.found = true;
       }
-    } catch { /* ignore individual parse errors */ }
+    }
   }
-
-  if (thinkBlocks > 0) usage.thinking_blocks = thinkBlocks;
-  if (thinkChars > 0) usage.thinking_chars = thinkChars;
-  return found ? usage : null;
 }
