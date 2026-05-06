@@ -3,5 +3,6 @@ dist/
 *.log
 *.log.old
 stats.json
+models.json
 .tokens/
 .playwright-mcp/
