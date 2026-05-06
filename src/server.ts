@@ -61,6 +61,21 @@ function buildCopilotHeaders(auth: AuthManager, req: express.Request): Record<st
   return headers;
 }
 
+function describeRequestThinking(body: any): string | null {
+  const t = body?.thinking;
+  if (!t || typeof t !== 'object') return null;
+  const effort = body?.output_config?.effort;
+  if (t.type === 'enabled') {
+    const budget = t.budget_tokens;
+    return budget != null ? `enabled/budget=${budget}` : 'enabled';
+  }
+  if (t.type === 'adaptive') {
+    return effort ? `adaptive/${effort}` : 'adaptive';
+  }
+  if (t.type === 'disabled') return 'disabled';
+  return t.type ? String(t.type) : null;
+}
+
 async function forwardRequest(
   auth: AuthManager,
   targetPath: string,
@@ -75,7 +90,12 @@ async function forwardRequest(
   const url = `${apiBase}${targetPath}`;
   const timeout = isStreaming ? STREAMING_TIMEOUT : NON_STREAMING_TIMEOUT;
 
-  logger.info(`[${reqId}] → ${body.model} ${targetPath}`, { streaming: isStreaming });
+  const requestBody = JSON.stringify(body);
+  const reqChars = requestBody.length;
+  const reqMeta: Record<string, any> = { streaming: isStreaming, req_chars: reqChars };
+  const thinkingDesc = describeRequestThinking(body);
+  if (thinkingDesc) reqMeta.thinking = thinkingDesc;
+  logger.info(`[${reqId}] → ${body.model} ${targetPath}`, reqMeta);
   logger.debug(`[${reqId}] Request headers`, Object.fromEntries(Object.entries(headers).map(([k, v]) =>
     k.toLowerCase() === 'authorization' ? [k, v.slice(0, 20) + '...'] : [k, v]
   )));
@@ -84,7 +104,7 @@ async function forwardRequest(
   const upstream = await fetch(url, {
     method: 'POST',
     headers,
-    body: JSON.stringify(body),
+    body: requestBody,
     signal: AbortSignal.timeout(timeout),
   });
 
@@ -96,13 +116,13 @@ async function forwardRequest(
     const retry = await fetch(url, {
       method: 'POST',
       headers: newHeaders,
-      body: JSON.stringify(body),
+      body: requestBody,
       signal: AbortSignal.timeout(timeout),
     });
-    return handleUpstreamResponse(retry, res, isStreaming, model, reqId);
+    return handleUpstreamResponse(retry, res, isStreaming, model, reqId, reqChars);
   }
 
-  return handleUpstreamResponse(upstream, res, isStreaming, model, reqId);
+  return handleUpstreamResponse(upstream, res, isStreaming, model, reqId, reqChars);
 }
 
 async function handleUpstreamResponse(
@@ -111,6 +131,7 @@ async function handleUpstreamResponse(
   isStreaming: boolean,
   model: string,
   reqId: string,
+  reqChars: number,
 ): Promise<void> {
   res.status(upstream.status);
   const forwardHeaders = ['content-type', 'x-request-id'];
@@ -123,10 +144,11 @@ async function handleUpstreamResponse(
     const text = await upstream.text();
     const usage = extractUsageFromResponse(text);
     const tokenInfo = usage ? ` ${formatUsage(usage)}` : '';
+    const sizeInfo = ` req=${reqChars} resp=${text.length}`;
     if (upstream.ok) {
-      logger.info(`[${reqId}] ← ${upstream.status} (no body)${tokenInfo}`);
+      logger.info(`[${reqId}] ← ${upstream.status} (no body)${tokenInfo}${sizeInfo}`);
     } else {
-      logger.error(`[${reqId}] ← ${upstream.status} (no body)${tokenInfo}`, { body: text });
+      logger.error(`[${reqId}] ← ${upstream.status} (no body)${tokenInfo}${sizeInfo}`, { body: text });
     }
     logger.debug(`[${reqId}] Response body`, { text });
     if (usage) recordUsage(model, usage);
@@ -154,7 +176,8 @@ async function handleUpstreamResponse(
       const allChunks = chunks.join('');
       const usage = extractUsageFromStream(allChunks);
       const tokenInfo = usage ? ` ${formatUsage(usage)}` : '';
-      logger.info(`[${reqId}] ← ${upstream.status} (streamed)${tokenInfo}`);
+      const sizeInfo = ` req=${reqChars} resp=${allChunks.length}`;
+      logger.info(`[${reqId}] ← ${upstream.status} (streamed)${tokenInfo}${sizeInfo}`);
       logger.debug(`[${reqId}] Response body`, { body: allChunks });
       if (usage) recordUsage(model, usage);
     }
@@ -162,10 +185,11 @@ async function handleUpstreamResponse(
     const data = await upstream.text();
     const usage = extractUsageFromResponse(data);
     const tokenInfo = usage ? ` ${formatUsage(usage)}` : '';
+    const sizeInfo = ` req=${reqChars} resp=${data.length}`;
     if (upstream.ok) {
-      logger.info(`[${reqId}] ← ${upstream.status}${tokenInfo}`);
+      logger.info(`[${reqId}] ← ${upstream.status}${tokenInfo}${sizeInfo}`);
     } else {
-      logger.error(`[${reqId}] ← ${upstream.status}${tokenInfo}`, { body: data });
+      logger.error(`[${reqId}] ← ${upstream.status}${tokenInfo}${sizeInfo}`, { body: data });
     }
     logger.debug(`[${reqId}] Response body`, { body: data });
     if (usage) recordUsage(model, usage);

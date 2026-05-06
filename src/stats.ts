@@ -15,6 +15,8 @@ export interface Usage {
   cache_creation_input_tokens: number;
   cache_read_input_tokens: number;
   output_tokens: number;
+  thinking_chars?: number;
+  thinking_blocks?: number;
 }
 
 type DailyStats = Record<string, Record<string, ModelStats>>;
@@ -69,6 +71,10 @@ export function formatUsage(usage: Usage): string {
   const parts = [`in=${usage.input_tokens}`, `out=${usage.output_tokens}`];
   if (usage.cache_read_input_tokens > 0) parts.push(`cache_read=${usage.cache_read_input_tokens}`);
   if (usage.cache_creation_input_tokens > 0) parts.push(`cache_create=${usage.cache_creation_input_tokens}`);
+  if (usage.thinking_blocks && usage.thinking_blocks > 0) {
+    const chars = usage.thinking_chars || 0;
+    parts.push(chars > 0 ? `thinking=${chars}` : 'thinking=hidden');
+  }
   return parts.join(' ');
 }
 
@@ -90,7 +96,22 @@ export function extractUsageFromResponse(body: string): Usage | null {
     const json = JSON.parse(body);
     // Anthropic format
     if (json.usage?.input_tokens != null) {
-      return extractAnthropicUsage(json.usage);
+      const usage = extractAnthropicUsage(json.usage);
+      if (Array.isArray(json.content)) {
+        let thinkChars = 0;
+        let thinkBlocks = 0;
+        for (const block of json.content) {
+          if (block?.type === 'thinking') {
+            thinkBlocks += 1;
+            if (typeof block.thinking === 'string') {
+              thinkChars += block.thinking.length;
+            }
+          }
+        }
+        if (thinkBlocks > 0) usage.thinking_blocks = thinkBlocks;
+        if (thinkChars > 0) usage.thinking_chars = thinkChars;
+      }
+      return usage;
     }
     // OpenAI format
     if (json.usage?.prompt_tokens != null) {
@@ -108,6 +129,8 @@ export function extractUsageFromResponse(body: string): Usage | null {
 export function extractUsageFromStream(chunks: string): Usage | null {
   const usage: Usage = { input_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 0 };
   let found = false;
+  let thinkChars = 0;
+  let thinkBlocks = 0;
 
   for (const line of chunks.split('\n')) {
     if (!line.startsWith('data: ')) continue;
@@ -130,6 +153,14 @@ export function extractUsageFromStream(chunks: string): Usage | null {
         usage.output_tokens = json.usage.output_tokens;
         found = true;
       }
+      // Anthropic: count thinking content blocks
+      if (json.type === 'content_block_start' && json.content_block?.type === 'thinking') {
+        thinkBlocks += 1;
+      }
+      // Anthropic: thinking_delta carries the streamed thinking text
+      if (json.type === 'content_block_delta' && json.delta?.type === 'thinking_delta' && typeof json.delta.thinking === 'string') {
+        thinkChars += json.delta.thinking.length;
+      }
       // OpenAI: last chunk may have usage
       if (json.usage?.prompt_tokens != null) {
         usage.input_tokens = json.usage.prompt_tokens || 0;
@@ -145,5 +176,7 @@ export function extractUsageFromStream(chunks: string): Usage | null {
     } catch { /* ignore individual parse errors */ }
   }
 
+  if (thinkBlocks > 0) usage.thinking_blocks = thinkBlocks;
+  if (thinkChars > 0) usage.thinking_chars = thinkChars;
   return found ? usage : null;
 }
