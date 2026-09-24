@@ -25,10 +25,10 @@ interface TestCase {
 }
 
 const TESTS: TestCase[] = [
-  { label: '4.6-1m + thinking=enabled(2k)',     model: 'claude-opus-4.6-1m',          thinking: { type: 'enabled', budget_tokens: 2000 }, max_tokens: 8000 },
-  { label: '4.7-1m + adaptive + effort=high',   model: 'claude-opus-4.7-1m-internal', thinking: { type: 'adaptive' }, output_config: { effort: 'high' },  max_tokens: 8000 },
-  { label: '4.7-1m + adaptive + effort=xhigh',  model: 'claude-opus-4.7-1m-internal', thinking: { type: 'adaptive' }, output_config: { effort: 'xhigh' }, max_tokens: 8000 },
-  { label: '4.7-1m + thinking=disabled',        model: 'claude-opus-4.7-1m-internal', thinking: { type: 'disabled' }, max_tokens: 8000 },
+  { label: '4.7 + thinking=enabled(2k)',     model: 'claude-opus-4.7', thinking: { type: 'enabled', budget_tokens: 2000 }, max_tokens: 8000 },
+  { label: '4.7 + adaptive + effort=high',   model: 'claude-opus-4.7', thinking: { type: 'adaptive' }, output_config: { effort: 'high' },  max_tokens: 8000 },
+  { label: '4.7 + adaptive + effort=xhigh',  model: 'claude-opus-4.7', thinking: { type: 'adaptive' }, output_config: { effort: 'xhigh' }, max_tokens: 8000 },
+  { label: '4.7 + thinking=disabled',        model: 'claude-opus-4.7', thinking: { type: 'disabled' }, max_tokens: 8000 },
 ];
 
 function loadToken(): { token: string; apiBase: string } {

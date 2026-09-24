@@ -11,7 +11,7 @@ Replicates the core functionality of the MAI LLM Proxy VS Code extension as a CL
 - **Anthropic API passthrough** — `/v1/messages` forwarded directly to Copilot API
 - **OpenAI API passthrough** — `/v1/chat/completions` forwarded to Copilot API
 - **Thinking mode support** — extended thinking works out of the box
-- **Model name transformation** — `claude-opus-4-6` → `claude-opus-4.6-1m`
+- **Optional model aliases** — compatibility mapping for clients that use alternate model IDs
 
 ## Quick Start
 
@@ -31,10 +31,10 @@ npm start          # PORT=5000 by default
 PORT=5000 LOG_LEVEL=debug npm start
 
 # Test
-curl http://localhost:5001/v1/messages \
+curl http://localhost:5000/v1/messages \
   -H "Content-Type: application/json" \
   -H "anthropic-version: 2023-06-01" \
-  -d '{"model":"claude-opus-4-6","max_tokens":50,"messages":[{"role":"user","content":"hi"}]}'
+  -d '{"model":"claude-opus-4.7","max_tokens":50,"messages":[{"role":"user","content":"hi"}]}'
 ```
 
 **PowerShell:**
@@ -43,24 +43,24 @@ curl http://localhost:5001/v1/messages \
 $env:PORT = "5000"; $env:LOG_LEVEL = "debug"; npm start
 
 # Test
-Invoke-RestMethod http://localhost:5001/v1/messages -Method POST `
+Invoke-RestMethod http://localhost:5000/v1/messages -Method POST `
   -ContentType "application/json" `
   -Headers @{ "anthropic-version" = "2023-06-01" } `
-  -Body '{"model":"claude-opus-4-6","max_tokens":50,"messages":[{"role":"user","content":"hi"}]}'
+  -Body '{"model":"claude-opus-4.7","max_tokens":50,"messages":[{"role":"user","content":"hi"}]}'
 ```
 
 ## Use with Claude Code
 
 **Bash:**
 ```bash
-export ANTHROPIC_BASE_URL=http://localhost:5001
+export ANTHROPIC_BASE_URL=http://localhost:5000
 export ANTHROPIC_AUTH_TOKEN=dummy
 claude
 ```
 
 **PowerShell:**
 ```powershell
-$env:ANTHROPIC_BASE_URL = "http://localhost:5001"
+$env:ANTHROPIC_BASE_URL = "http://localhost:5000"
 $env:ANTHROPIC_AUTH_TOKEN = "dummy"
 claude
 ```
@@ -68,7 +68,7 @@ claude
 ## Architecture
 
 ```
-Claude Code → copilot-proxy (localhost:5001) → api.enterprise.githubcopilot.com
+Claude Code → copilot-proxy (localhost:5000) → api.enterprise.githubcopilot.com
               ├── /v1/messages     → Anthropic native passthrough
               └── /chat/completions → OpenAI format passthrough
 ```
