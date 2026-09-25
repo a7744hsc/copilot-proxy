@@ -20,7 +20,7 @@ npm install
 npm start          # PORT=5000 by default
 
 # First run opens GitHub device flow in terminal
-# After auth, tokens are cached at ~/.config/llm-proxy/github_copilot/
+# After auth, tokens are cached in .tokens/ under the working directory
 ```
 
 ## Usage
@@ -64,6 +64,10 @@ $env:ANTHROPIC_BASE_URL = "http://localhost:5000"
 $env:ANTHROPIC_AUTH_TOKEN = "dummy"
 claude
 ```
+
+## Use with Pi Agent
+
+See [Pi Agent integration](docs/pi-agent.md) for the validated custom provider configuration, supported Claude models, thinking settings, and troubleshooting steps.
 
 ## Architecture
 
