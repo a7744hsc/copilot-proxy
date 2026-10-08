@@ -1,8 +1,22 @@
+# Dependencies and build output
 node_modules/
 dist/
+
+# Private runtime data
 *.log
 *.log.*
 stats.json
 models.json
 .tokens/
 .playwright-mcp/
+/tmp/
+
+# Local credentials and personal settings
+.env
+.env.*
+!.env.example
+/.claude/settings.local.json
+/.vscode/
+
+# macOS metadata
+.DS_Store

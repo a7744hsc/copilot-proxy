@@ -98,7 +98,7 @@ async function forwardRequest(
   if (thinkingDesc) reqMeta.thinking = thinkingDesc;
   logger.info(`[${reqId}] → ${body.model} ${targetPath}`, reqMeta);
   logger.debug(`[${reqId}] Request headers`, Object.fromEntries(Object.entries(headers).map(([k, v]) =>
-    k.toLowerCase() === 'authorization' ? [k, v.slice(0, 20) + '...'] : [k, v]
+    k.toLowerCase() === 'authorization' ? [k, '[REDACTED]'] : [k, v]
   )));
   logger.debug(`[${reqId}] Request body`, body);
 

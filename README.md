@@ -28,7 +28,7 @@ npm start          # PORT=5000 by default
 **Bash:**
 ```bash
 # Set port and log level
-PORT=5000 LOG_LEVEL=debug npm start
+PORT=5000 LOG_LEVEL=info npm start
 
 # Test
 curl http://localhost:5000/v1/messages \
@@ -40,7 +40,7 @@ curl http://localhost:5000/v1/messages \
 **PowerShell:**
 ```powershell
 # Set port and log level
-$env:PORT = "5000"; $env:LOG_LEVEL = "debug"; npm start
+$env:PORT = "5000"; $env:LOG_LEVEL = "info"; npm start
 
 # Test
 Invoke-RestMethod http://localhost:5000/v1/messages -Method POST `
@@ -50,6 +50,8 @@ Invoke-RestMethod http://localhost:5000/v1/messages -Method POST `
 ```
 
 ## Use with Claude Code
+
+For a quick one-off session:
 
 **Bash:**
 ```bash
@@ -65,14 +67,25 @@ $env:ANTHROPIC_AUTH_TOKEN = "dummy"
 claude
 ```
 
+See [Claude Code integration](docs/claude-code.md) for persistent settings, model ID overrides, 1M context configuration, validation, and troubleshooting.
+
 ## Use with Pi Agent
 
 See [Pi Agent integration](docs/pi-agent.md) for the validated custom provider configuration, supported Claude models, thinking settings, and troubleshooting steps.
 
+## Security and local data
+
+- Keep the proxy bound to its default `127.0.0.1`. It does **not** authenticate incoming requests; `ANTHROPIC_AUTH_TOKEN=dummy` is only a client placeholder. Do not expose it directly to a network or public tunnel.
+- GitHub and Copilot credentials are stored as plaintext in `.tokens/` under the working directory. Keep this directory private and never commit or share it.
+- `LOG_LEVEL=info` is the default. Enable `debug` only for local troubleshooting: it records complete request and response bodies, including prompts, code, tool results, and model output. Authorization headers are redacted, but bodies and other headers may still contain secrets. Error responses can be logged even at `info`.
+- Keep all `proxy.log*` files, `stats.json`, `models.json`, browser artifacts, and temporary output local. Client flags such as `--no-session-persistence` do not disable proxy logging. Never upload raw logs or a copy of the entire working directory or `.git` directory.
+- `.gitignore` excludes runtime data, `.env` files, local Claude Code settings, personal editor settings, and `tmp/`. Only sanitized `.env.example` templates are eligible for tracking. Ignore rules do not remove files that were already committed.
+- `config.json` is shared configuration: keep it free of credentials, private request content, and secret header overrides. Run the proxy from this repository so its runtime files stay under these ignore rules.
+
 ## Architecture
 
 ```
-Claude Code → copilot-proxy (localhost:5000) → api.enterprise.githubcopilot.com
+Claude Code → copilot-proxy (127.0.0.1:5000) → Copilot API endpoint from authentication
               ├── /v1/messages     → Anthropic native passthrough
-              └── /chat/completions → OpenAI format passthrough
+              └── /v1/chat/completions → OpenAI format passthrough
 ```
