@@ -665,3 +665,72 @@ test('catalog errors preserve upstream status, body and rate headers without ret
     assert.equal(calls, before + 1);
   });
 });
+
+test('noninteractive authentication rejects missing, corrupt and expired caches without device flow', async (t) => {
+  let calls = 0;
+  t.mock.method(globalThis, 'fetch', async () => {
+    calls++;
+    return new Response('Unexpected authentication request', { status: 500 });
+  });
+  for (const [name, content] of [
+    ['missing', null], ['corrupt', '{invalid json'],
+    ['expired', JSON.stringify({ token: 'fake-expired-token', expires_at: 1 })],
+  ] as const) {
+    const directory = path.join(testDirectory, `headless-${name}`);
+    fs.mkdirSync(directory);
+    if (content !== null) fs.writeFileSync(path.join(directory, 'api-key.json'), content);
+    const auth = new AuthManager(directory);
+    try { assert.equal(await auth.ensureAuthenticated({ interactive: false }), false); }
+    finally { auth.dispose(); }
+  }
+  assert.equal(calls, 0);
+});
+
+test('noninteractive authentication reuses a valid cached token without a network call', async (t) => {
+  const request = t.mock.method(globalThis, 'fetch', async () => new Response('Unexpected request', { status: 500 }));
+  const auth = new AuthManager(testDirectory);
+  try {
+    assert.equal(await auth.ensureAuthenticated({ interactive: false }), true);
+    assert.equal(auth.getCopilotToken(), 'fake-test-token');
+    assert.equal(request.mock.callCount(), 0);
+  } finally { auth.dispose(); }
+});
+
+for (const status of [200, 401]) {
+  test(`noninteractive expired-token refresh handles ${status} without starting device flow`, async (t) => {
+    const directory = path.join(testDirectory, `headless-refresh-${status}`);
+    fs.mkdirSync(directory);
+    fs.writeFileSync(path.join(directory, 'access-token'), 'fake-access-token');
+    fs.writeFileSync(path.join(directory, 'api-key.json'), JSON.stringify({ token: 'fake-expired-token', expires_at: 1 }));
+    const urls: string[] = [];
+    t.mock.method(globalThis, 'fetch', async (url: string) => {
+      urls.push(url);
+      return status === 200 ? Response.json({
+        token: 'fake-refreshed-token', expires_at: Math.floor(Date.now() / 1000) + 86400,
+        endpoints: { api: 'https://copilot.example' },
+      }) : new Response('Token rejected', { status });
+    });
+    const auth = new AuthManager(directory);
+    try {
+      assert.equal(await auth.ensureAuthenticated({ interactive: false }), status === 200);
+      assert.deepEqual(urls, ['https://api.github.com/copilot_internal/v2/token']);
+      if (status === 200) {
+        assert.equal(auth.getCopilotToken(), 'fake-refreshed-token');
+        assert.equal(JSON.parse(fs.readFileSync(path.join(directory, 'api-key.json'), 'utf-8')).token, 'fake-refreshed-token');
+      }
+    } finally { auth.dispose(); }
+  });
+}
+
+test('default authentication still starts device flow when no credentials are cached', async (t) => {
+  const urls: string[] = [];
+  t.mock.method(globalThis, 'fetch', async (url: string) => {
+    urls.push(url);
+    return new Response('Synthetic device-flow rejection', { status: 400 });
+  });
+  const auth = new AuthManager(path.join(testDirectory, 'interactive-empty'));
+  try {
+    assert.equal(await auth.ensureAuthenticated(), false);
+    assert.deepEqual(urls, ['https://github.com/login/device/code']);
+  } finally { auth.dispose(); }
+});

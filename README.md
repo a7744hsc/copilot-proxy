@@ -15,6 +15,7 @@ Replicates the core functionality of the MAI LLM Proxy VS Code extension as a CL
 - **Usage detail** — cache reads/writes, reasoning tokens, and HTTP/429 response counts
 - **Thinking mode support** — extended thinking works out of the box
 - **Optional model aliases** — compatibility mapping for clients that use alternate model IDs
+- **Windows autostart** — opt-in, current-user scheduled task with unattended authentication
 
 ## Quick Start
 
@@ -51,6 +52,62 @@ Invoke-RestMethod http://localhost:5000/v1/messages -Method POST `
   -Headers @{ "anthropic-version" = "2023-06-01" } `
   -Body '{"model":"claude-opus-4.7","max_tokens":50,"messages":[{"role":"user","content":"hi"}]}'
 ```
+
+## Windows autostart
+
+Requires Windows PowerShell 5.1, Node.js, and the project's installed dependencies.
+Complete authentication once with `npm start` before installing autostart.
+The task reuses `.tokens/`; it does not store credentials in its definition.
+
+```powershell
+npm run autostart -- install
+npm run autostart -- start
+npm run autostart -- status
+npm run autostart -- stop
+npm run autostart -- uninstall
+```
+
+`install` runs `npm run build` and registers or updates this checkout's task.
+It does **not** start the task or interrupt a manually running proxy. The task
+starts in the background 15 seconds after the current user logs into Windows,
+not before login. It runs with the user's normal permissions, needs no stored
+Windows password, and does not depend on an open terminal. Windows task and
+script execution policies still apply; the installer does not elevate or bypass
+them. A supervisor-owned pipe ensures that stopping the scheduled task also
+terminates its Node child instead of leaving an orphaned proxy.
+
+The task records absolute Node and script paths, fixes the working directory to
+this checkout, and runs `dist/index.js` at `127.0.0.1:5000` with `LOG_LEVEL=info`
+and this checkout's `config.json`. It stays enabled on battery power, has no
+execution time limit, and ignores parallel starts. Process failures are retried
+up to three times, one minute apart. HTTP request retry and timeout policies are
+unchanged.
+
+`start` waits up to 30 seconds for the task and an active readiness probe. If that
+wait fails, inspect `status`: a queued or slow-starting task may still be active.
+Port conflicts are reported without killing or adopting another process. Stop a
+manually launched proxy yourself before starting the managed task. `stop` keeps
+autostart registered; `uninstall` stops and removes only this checkout's task.
+Repeated installation or removal is safe, and conflicting task ownership is
+reported instead of overwritten.
+
+`status` reports installation state, scheduler state, last run time, last result
+code, and passive proxy health. Endpoint health may belong to a manually started
+proxy; a healthy endpoint alone does not mean the scheduled task is running.
+Application logs remain in `proxy.log`; runner failures are summarized in
+`startup.log`, and `startup-stderr.log` captures Node startup diagnostics for the
+latest launch. These logs are local and gitignored.
+
+Background launches set `COPILOT_PROXY_NON_INTERACTIVE=1`: valid cached tokens
+are reused and expired tokens can be refreshed, but missing or rejected
+credentials cause an explicit failure instead of waiting for device login.
+Run `npm start` interactively to reauthenticate, then start the task again.
+Normal `npm start` retains its interactive authentication behavior.
+
+After changing application source, rebuild and explicitly stop/start the task
+to load the new code. If moving the checkout, uninstall from its old location
+first. Reinstall after moving the checkout or changing the Node installation
+path. Different users and checkout paths have separate task identities.
 
 ## Use with Claude Code
 

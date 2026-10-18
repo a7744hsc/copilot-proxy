@@ -7,6 +7,7 @@
     "start": "tsx src/index.ts",
     "build": "tsc",
     "dev": "tsx watch src/index.ts",
+    "autostart": "powershell.exe -NoProfile -File scripts\\autostart.ps1",
     "sync:codex": "tsx scripts/sync-codex-catalog.ts",
     "test": "tsx --test tests/*.test.ts"
   },

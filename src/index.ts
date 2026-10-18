@@ -8,6 +8,15 @@ import { loadStats } from './stats.js';
 const PORT = parseInt(process.env.PORT || '5000', 10);
 const HOST = process.env.HOST || '127.0.0.1';
 
+if (process.env.COPILOT_PROXY_SUPERVISED === '1') {
+  const input = process.stdin;
+  if (!(input instanceof net.Socket)) throw new Error('Supervised startup requires a supervisor-owned stdin pipe.');
+  // Task Scheduler can kill PowerShell without terminating its Node child.
+  input.once('end', () => process.exit());
+  input.resume();
+  input.unref();
+}
+
 function checkPort(port: number, host: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const tester = net.createServer()
@@ -35,10 +44,12 @@ async function main() {
   const auth = new AuthManager();
 
   // Authenticate (loads tokens or starts device flow)
-  const ok = await auth.ensureAuthenticated();
+  const ok = await auth.ensureAuthenticated({ interactive: process.env.COPILOT_PROXY_NON_INTERACTIVE !== '1' });
   if (!ok) {
     logger.error('Authentication failed. Exiting.');
-    process.exit(1);
+    auth.dispose();
+    process.exitCode = 1;
+    return;
   }
 
   // Start server

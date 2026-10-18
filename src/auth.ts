@@ -38,7 +38,7 @@ export class AuthManager {
 
   // --- Public API ---
 
-  async ensureAuthenticated(): Promise<boolean> {
+  async ensureAuthenticated({ interactive = true }: { interactive?: boolean } = {}): Promise<boolean> {
     // Try loading existing tokens first
     if (await this.loadTokens()) {
       if (this.isCopilotTokenValid()) {
@@ -54,9 +54,14 @@ export class AuthManager {
           this.scheduleRefresh();
           return true;
         } catch (e: any) {
-          logger.warn(`Token refresh failed: ${e.message}, starting device flow`);
+          logger.warn(`Token refresh failed: ${e.message}`);
         }
       }
+    }
+
+    if (!interactive) {
+      logger.error('Non-interactive authentication failed. Run npm start in a terminal to authenticate, then restart the background proxy.');
+      return false;
     }
 
     // Fall through to device flow
