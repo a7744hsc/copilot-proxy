@@ -6,7 +6,9 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "build": "tsc",
-    "dev": "tsx watch src/index.ts"
+    "dev": "tsx watch src/index.ts",
+    "sync:codex": "tsx scripts/sync-codex-catalog.ts",
+    "test": "tsx --test tests/*.test.ts"
   },
   "dependencies": {
     "express": "^4.21.0"

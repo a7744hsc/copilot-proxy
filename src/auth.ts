@@ -70,6 +70,18 @@ export class AuthManager {
     return this.copilotToken?.token || null;
   }
 
+  getAuthStatus() {
+    const expiresAt = this.copilotToken?.expires_at;
+    const validExpiry = typeof expiresAt === 'number' && Number.isFinite(expiresAt)
+      && expiresAt > 0 && expiresAt <= 8.64e12;
+    const remaining = validExpiry ? Math.max(0, Math.floor(expiresAt - Date.now() / 1000)) : 0;
+    return {
+      state: !this.copilotToken?.token ? 'missing' : !validExpiry ? 'invalid' : remaining > 0 ? 'valid' : 'expired',
+      expires_at: validExpiry ? new Date(expiresAt * 1000).toISOString() : null,
+      expires_in_seconds: remaining,
+    };
+  }
+
   getCopilotApiBase(): string {
     return this.copilotToken?.endpoints?.api || 'https://api.githubcopilot.com';
   }

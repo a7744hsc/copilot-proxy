@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { logger } from './logger.js';
+import { asRecord, tokenCount } from './data.js';
 
 interface ModelStats {
   input_tokens: number;
@@ -8,6 +9,10 @@ interface ModelStats {
   cache_read_input_tokens: number;
   output_tokens: number;
   requests: number;
+  reasoning_tokens: number;
+  http_responses: number;
+  http_error_responses: number;
+  rate_limited_responses: number;
 }
 
 export interface Usage {
@@ -15,6 +20,7 @@ export interface Usage {
   cache_creation_input_tokens: number;
   cache_read_input_tokens: number;
   output_tokens: number;
+  reasoning_tokens?: number;
   thinking_chars?: number;
   thinking_blocks?: number;
 }
@@ -30,6 +36,10 @@ const EMPTY_STATS: ModelStats = {
   cache_read_input_tokens: 0,
   output_tokens: 0,
   requests: 0,
+  reasoning_tokens: 0,
+  http_responses: 0,
+  http_error_responses: 0,
+  rate_limited_responses: 0,
 };
 
 export function loadStats(): void {
@@ -54,16 +64,29 @@ function today(): string {
 }
 
 export function recordUsage(model: string, usage: Usage): void {
+  const entry = currentModelStats(model);
+  entry.input_tokens += usage.input_tokens;
+  entry.cache_creation_input_tokens += usage.cache_creation_input_tokens;
+  entry.cache_read_input_tokens += usage.cache_read_input_tokens;
+  entry.output_tokens += usage.output_tokens;
+  entry.reasoning_tokens += usage.reasoning_tokens ?? 0;
+  entry.requests += 1;
+
+  saveStats();
+}
+
+function currentModelStats(model: string): ModelStats {
   const day = today();
   if (!stats[day]) stats[day] = {};
-  if (!stats[day][model]) stats[day][model] = { ...EMPTY_STATS };
+  stats[day][model] = { ...EMPTY_STATS, ...stats[day][model] };
+  return stats[day][model];
+}
 
-  stats[day][model].input_tokens += usage.input_tokens;
-  stats[day][model].cache_creation_input_tokens += usage.cache_creation_input_tokens;
-  stats[day][model].cache_read_input_tokens += usage.cache_read_input_tokens;
-  stats[day][model].output_tokens += usage.output_tokens;
-  stats[day][model].requests += 1;
-
+export function recordHttpResponse(model: string, status: number): void {
+  const entry = currentModelStats(model);
+  entry.http_responses += 1;
+  if (status >= 400) entry.http_error_responses += 1;
+  if (status === 429) entry.rate_limited_responses += 1;
   saveStats();
 }
 
@@ -71,6 +94,7 @@ export function formatUsage(usage: Usage): string {
   const parts = [`in=${usage.input_tokens}`, `out=${usage.output_tokens}`];
   if (usage.cache_read_input_tokens > 0) parts.push(`cache_read=${usage.cache_read_input_tokens}`);
   if (usage.cache_creation_input_tokens > 0) parts.push(`cache_create=${usage.cache_creation_input_tokens}`);
+  if (usage.reasoning_tokens) parts.push(`reasoning=${usage.reasoning_tokens}`);
   if (usage.thinking_blocks && usage.thinking_blocks > 0) {
     const chars = usage.thinking_chars || 0;
     parts.push(chars > 0 ? `thinking=${chars}` : 'thinking=hidden');
@@ -79,28 +103,42 @@ export function formatUsage(usage: Usage): string {
 }
 
 export function getStats(): DailyStats {
-  return stats;
+  return Object.fromEntries(Object.entries(stats).map(([day, models]) => [
+    day,
+    Object.fromEntries(Object.entries(models).map(([model, entry]) => [model, { ...EMPTY_STATS, ...entry }])),
+  ]));
 }
 
-function extractAnthropicUsage(usage: any): Usage {
+function extractTokenUsage(value: unknown): Usage | null {
+  const usage = asRecord(value);
+  if (!usage) return null;
+  const input = tokenCount(usage.input_tokens) ?? tokenCount(usage.prompt_tokens);
+  if (input === undefined) return null;
+  const inputDetails = asRecord(usage.input_tokens_details) ?? asRecord(usage.prompt_tokens_details);
+  const outputDetails = asRecord(usage.output_tokens_details) ?? asRecord(usage.completion_tokens_details);
   return {
-    input_tokens: usage.input_tokens || 0,
-    cache_creation_input_tokens: usage.cache_creation_input_tokens || 0,
-    cache_read_input_tokens: usage.cache_read_input_tokens || 0,
-    output_tokens: usage.output_tokens || 0,
+    input_tokens: input,
+    cache_creation_input_tokens: tokenCount(usage.cache_creation_input_tokens)
+      ?? tokenCount(usage.cache_write_input_tokens)
+      ?? tokenCount(inputDetails?.cache_write_tokens) ?? 0,
+    cache_read_input_tokens: tokenCount(usage.cache_read_input_tokens)
+      ?? tokenCount(inputDetails?.cached_tokens) ?? 0,
+    output_tokens: tokenCount(usage.output_tokens) ?? tokenCount(usage.completion_tokens) ?? 0,
+    reasoning_tokens: tokenCount(outputDetails?.reasoning_tokens) ?? 0,
   };
 }
 
 export function extractUsageFromResponse(body: string): Usage | null {
   try {
-    const json = JSON.parse(body);
-    // Anthropic format
-    if (json.usage?.input_tokens != null) {
-      const usage = extractAnthropicUsage(json.usage);
+    const json = asRecord(JSON.parse(body));
+    if (!json) return null;
+    const usage = extractTokenUsage(json.usage);
+    if (usage) {
       if (Array.isArray(json.content)) {
         let thinkChars = 0;
         let thinkBlocks = 0;
-        for (const block of json.content) {
+        for (const value of json.content) {
+          const block = asRecord(value);
           if (block?.type === 'thinking') {
             thinkBlocks += 1;
             if (typeof block.thinking === 'string') {
@@ -112,15 +150,6 @@ export function extractUsageFromResponse(body: string): Usage | null {
         if (thinkChars > 0) usage.thinking_chars = thinkChars;
       }
       return usage;
-    }
-    // OpenAI format
-    if (json.usage?.prompt_tokens != null) {
-      return {
-        input_tokens: json.usage.prompt_tokens || 0,
-        cache_creation_input_tokens: 0,
-        cache_read_input_tokens: 0,
-        output_tokens: json.usage.completion_tokens || 0,
-      };
     }
   } catch { /* ignore parse errors */ }
   return null;
@@ -142,11 +171,10 @@ export class StreamUsageAccumulator {
 
   addChunk(chunk: string): void {
     this.buffer += chunk;
-    let idx;
-    // SSE events are separated by blank line ("\n\n"). Process each complete event and drop it.
-    while ((idx = this.buffer.indexOf('\n\n')) !== -1) {
-      const block = this.buffer.slice(0, idx);
-      this.buffer = this.buffer.slice(idx + 2);
+    let separator: RegExpExecArray | null;
+    while ((separator = /\r?\n\r?\n/.exec(this.buffer)) !== null) {
+      const block = this.buffer.slice(0, separator.index);
+      this.buffer = this.buffer.slice(separator.index + separator[0].length);
       this.processBlock(block);
     }
   }
@@ -166,51 +194,44 @@ export class StreamUsageAccumulator {
   }
 
   private processBlock(block: string): void {
-    for (const line of block.split('\n')) {
-      if (!line.startsWith('data: ')) continue;
-      const data = line.slice(6).trim();
-      if (data === '[DONE]') continue;
+    const data = block.split(/\r?\n/).filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trimStart()).join('\n').trim();
+    if (!data || data === '[DONE]') return;
+    let json: Record<string, unknown> | undefined;
+    try {
+      json = asRecord(JSON.parse(data));
+    } catch {
+      return;
+    }
+    if (!json) return;
 
-      let json: any;
-      try {
-        json = JSON.parse(data);
-      } catch {
-        continue;
-      }
-
-      // Anthropic: message_start has input usage
-      if (json.type === 'message_start' && json.message?.usage != null) {
-        const u = extractAnthropicUsage(json.message.usage);
-        this.usage.input_tokens = u.input_tokens;
-        this.usage.cache_creation_input_tokens = u.cache_creation_input_tokens;
-        this.usage.cache_read_input_tokens = u.cache_read_input_tokens;
-        this.found = true;
-      }
-      // Anthropic: message_delta has output_tokens
-      if (json.type === 'message_delta' && json.usage?.output_tokens != null) {
-        this.usage.output_tokens = json.usage.output_tokens;
-        this.found = true;
-      }
-      // Anthropic: count thinking content blocks
-      if (json.type === 'content_block_start' && json.content_block?.type === 'thinking') {
-        this.thinkBlocks += 1;
-      }
-      // Anthropic: thinking_delta carries the streamed thinking text
-      if (json.type === 'content_block_delta' && json.delta?.type === 'thinking_delta' && typeof json.delta.thinking === 'string') {
-        this.thinkChars += json.delta.thinking.length;
-      }
-      // OpenAI: last chunk may have usage
-      if (json.usage?.prompt_tokens != null) {
-        this.usage.input_tokens = json.usage.prompt_tokens || 0;
-        this.usage.output_tokens = json.usage.completion_tokens || 0;
-        this.found = true;
-      }
-      // Responses API: response.completed event has response.usage
-      if (json.type === 'response.completed' && json.response?.usage != null) {
-        this.usage.input_tokens = json.response.usage.input_tokens || 0;
-        this.usage.output_tokens = json.response.usage.output_tokens || 0;
-        this.found = true;
-      }
+    // Anthropic: message_start has input usage; message_delta has output usage.
+    const messageUsage = extractTokenUsage(asRecord(json.message)?.usage);
+    if (json.type === 'message_start' && messageUsage) {
+      this.usage = { ...messageUsage };
+      this.found = true;
+    }
+    const outputTokens = tokenCount(asRecord(json.usage)?.output_tokens);
+    if (json.type === 'message_delta' && outputTokens !== undefined) {
+      this.usage.output_tokens = outputTokens;
+      this.found = true;
+    }
+    if (json.type === 'content_block_start' && asRecord(json.content_block)?.type === 'thinking') {
+      this.thinkBlocks += 1;
+    }
+    const delta = asRecord(json.delta);
+    if (json.type === 'content_block_delta' && delta?.type === 'thinking_delta' && typeof delta.thinking === 'string') {
+      this.thinkChars += delta.thinking.length;
+    }
+    const openAIUsage = extractTokenUsage(json.usage);
+    if (json.type !== 'message_delta' && openAIUsage) {
+      this.usage = openAIUsage;
+      this.found = true;
+    }
+    const responseUsage = extractTokenUsage(asRecord(json.response)?.usage);
+    if (['response.completed', 'response.incomplete', 'response.failed'].includes(String(json.type)) && responseUsage) {
+      this.usage = responseUsage;
+      this.found = true;
     }
   }
 }

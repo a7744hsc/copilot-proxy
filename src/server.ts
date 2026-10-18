@@ -2,7 +2,11 @@ import express from 'express';
 import { AuthManager } from './auth.js';
 import { resolveModel, applyRequestOverrides, getHeaderOverrides } from './config.js';
 import { logger, generateRequestId, formatDuration } from './logger.js';
-import { recordUsage, getStats, extractUsageFromResponse, StreamUsageAccumulator, formatUsage } from './stats.js';
+import { recordUsage, recordHttpResponse, getStats, extractUsageFromResponse, StreamUsageAccumulator, formatUsage } from './stats.js';
+import { buildCodexCatalog, loadCodexTemplates } from './catalog.js';
+import { UpstreamFeedback, isRateLimitHeader } from './feedback.js';
+import { asRecord } from './data.js';
+import { defaultAdapters, type CompatibilityAdapter } from './compatibility/index.js';
 
 const STREAMING_TIMEOUT = 600_000;  // 10 min
 const NON_STREAMING_TIMEOUT = 300_000;  // 5 min
@@ -85,6 +89,7 @@ async function forwardRequest(
   res: express.Response,
   model: string,
   reqId: string,
+  feedback: UpstreamFeedback,
 ): Promise<void> {
   const apiBase = auth.getCopilotApiBase();
   const url = `${apiBase}${targetPath}`;
@@ -102,24 +107,24 @@ async function forwardRequest(
   )));
   logger.debug(`[${reqId}] Request body`, body);
 
-  const upstream = await fetch(url, {
+  const upstream = await feedback.fetch(url, {
     method: 'POST',
     headers,
     body: requestBody,
     signal: AbortSignal.timeout(timeout),
-  });
+  }, targetPath, model);
 
   // 401 → refresh and retry once
   if (upstream.status === 401) {
     logger.warn(`[${reqId}] Copilot returned 401, refreshing token and retrying...`);
     await auth.forceRefresh();
     const newHeaders = { ...headers, Authorization: `Bearer ${auth.getCopilotToken()}` };
-    const retry = await fetch(url, {
+    const retry = await feedback.fetch(url, {
       method: 'POST',
       headers: newHeaders,
       body: requestBody,
       signal: AbortSignal.timeout(timeout),
-    });
+    }, targetPath, model);
     return handleUpstreamResponse(retry, res, isStreaming, model, reqId, reqChars, startTime);
   }
 
@@ -136,11 +141,15 @@ async function handleUpstreamResponse(
   startTime: number,
 ): Promise<void> {
   res.status(upstream.status);
+  recordHttpResponse(model, upstream.status);
   const forwardHeaders = ['content-type', 'x-request-id'];
   for (const h of forwardHeaders) {
     const val = upstream.headers.get(h);
     if (val) res.setHeader(h, val);
   }
+  upstream.headers.forEach((value, name) => {
+    if (isRateLimitHeader(name)) res.setHeader(name, value);
+  });
 
   if (!upstream.body) {
     const text = await upstream.text();
@@ -203,15 +212,50 @@ async function handleUpstreamResponse(
   }
 }
 
-export function createServer(auth: AuthManager): express.Express {
+export function createServer(
+  auth: AuthManager,
+  adapters: readonly CompatibilityAdapter[] = defaultAdapters,
+): express.Express {
   const app = express();
+  const feedback = new UpstreamFeedback();
+
+  const fetchModels = async (): Promise<Response> => {
+    const token = auth.getCopilotToken();
+    if (!token) throw new Error('No Copilot token available');
+    return feedback.fetch(`${auth.getCopilotApiBase()}/models`, {
+      headers: { Authorization: `Bearer ${token}`, ...getHeaderOverrides() },
+    }, '/models');
+  };
+
+  const sendHealth = (res: express.Response, probeFailed = false) => {
+    if (probeFailed) feedback.recordProbeFailure();
+    const health = feedback.getHealth(auth);
+    res.status(health.ready ? 200 : 503).json(health);
+  };
 
   app.use(express.json({ limit: '50mb' }));
 
-  // Health check
-  app.get('/health', (_req, res) => {
-    const token = auth.getCopilotToken();
-    res.json({ status: token ? 'ok' : 'unauthenticated' });
+  app.get('/health/live', (_req, res) => {
+    res.json({ status: 'ok', uptime_seconds: Math.floor(process.uptime()) });
+  });
+  app.get('/health', (_req, res) => sendHealth(res));
+  app.get('/health/ready', async (_req, res) => {
+    try {
+      const upstream = await fetchModels();
+      const body = await upstream.text();
+      if (!upstream.ok) {
+        sendHealth(res, true);
+        return;
+      }
+      if (!Array.isArray(asRecord(JSON.parse(body))?.data)) {
+        throw new Error('Copilot readiness probe returned an invalid model list.');
+      }
+    } catch (error) {
+      logger.error(`Readiness check failed: ${error instanceof Error ? error.message : String(error)}`);
+      sendHealth(res, true);
+      return;
+    }
+    sendHealth(res);
   });
 
   // --- Anthropic routes ---
@@ -245,7 +289,7 @@ export function createServer(auth: AuthManager): express.Express {
       const headers = buildCopilotHeaders(auth, req);
       const isStreaming = body.stream === true;
 
-      await forwardRequest(auth, '/v1/messages', body, headers, isStreaming, res, body.model, reqId);
+      await forwardRequest(auth, '/v1/messages', body, headers, isStreaming, res, body.model, reqId, feedback);
     } catch (e: any) {
       logger.error(`[${reqId}] Anthropic handler error: ${e.message}`);
       res.status(500).json({
@@ -277,7 +321,7 @@ export function createServer(auth: AuthManager): express.Express {
       const headers = buildCopilotHeaders(auth, req);
       const isStreaming = body.stream === true;
 
-      await forwardRequest(auth, '/chat/completions', body, headers, isStreaming, res, body.model || 'unknown', reqId);
+      await forwardRequest(auth, '/chat/completions', body, headers, isStreaming, res, body.model || 'unknown', reqId, feedback);
     } catch (e: any) {
       logger.error(`[${reqId}] OpenAI handler error: ${e.message}`);
       res.status(500).json({
@@ -290,12 +334,12 @@ export function createServer(auth: AuthManager): express.Express {
   app.post('/chat/completions', handleOpenAIRequest);
 
   // --- Responses API routes ---
-  const handleResponsesRequest = async (req: express.Request, res: express.Response) => {
+  const handleResponsesRequest = (adapter?: CompatibilityAdapter) => async (req: express.Request, res: express.Response) => {
     const reqId = generateRequestId();
     try {
-      let body = { ...req.body };
+      let body: Record<string, unknown> = { ...req.body };
 
-      if (body.model) {
+      if (typeof body.model === 'string') {
         const originalModel = body.model;
         body.model = resolveModel(body.model);
         if (originalModel !== body.model) {
@@ -303,12 +347,22 @@ export function createServer(auth: AuthManager): express.Express {
         }
       }
 
-      body = applyRequestOverrides(body, 'openai') as any;
+      body = applyRequestOverrides(body, adapter?.requestFormat ?? 'openai');
+      if (adapter) {
+        const adapted = adapter.adaptRequest(body);
+        body = adapted.body;
+        res.setHeader('x-copilot-proxy-adapter', adapter.id);
+        if (adapted.changes.length > 0) {
+          res.setHeader('x-copilot-proxy-adjustments', adapted.changes.join(','));
+          logger.info(`[${reqId}] Compatibility: ${adapter.id}`, { changes: adapted.changes });
+        }
+      }
 
       const headers = buildCopilotHeaders(auth, req);
       const isStreaming = body.stream === true;
+      const model = typeof body.model === 'string' && body.model ? body.model : 'unknown';
 
-      await forwardRequest(auth, '/responses', body, headers, isStreaming, res, body.model || 'unknown', reqId);
+      await forwardRequest(auth, adapter?.upstreamPath ?? '/responses', body, headers, isStreaming, res, model, reqId, feedback);
     } catch (e: any) {
       logger.error(`[${reqId}] Responses handler error: ${e.message}`);
       res.status(500).json({
@@ -317,24 +371,17 @@ export function createServer(auth: AuthManager): express.Express {
     }
   };
 
-  app.post('/v1/responses', handleResponsesRequest);
-  app.post('/responses', handleResponsesRequest);
+  app.post('/v1/responses', handleResponsesRequest());
+  app.post('/responses', handleResponsesRequest());
+  for (const adapter of adapters) {
+    app.post(adapter.route, handleResponsesRequest(adapter));
+  }
 
   // --- Models route ---
   app.get('/v1/models', async (_req, res) => {
     try {
-      const apiBase = auth.getCopilotApiBase();
-      const token = auth.getCopilotToken();
-      if (!token) throw new Error('No Copilot token available');
-
-      const overrides = getHeaderOverrides();
       logger.info('→ GET /models');
-      const upstream = await fetch(`${apiBase}/models`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          ...overrides,
-        },
-      });
+      const upstream = await fetchModels();
 
       const data = await upstream.text();
       if (upstream.ok) {
@@ -347,12 +394,41 @@ export function createServer(auth: AuthManager): express.Express {
       res.status(upstream.status);
       const ct = upstream.headers.get('content-type');
       if (ct) res.setHeader('content-type', ct);
+      upstream.headers.forEach((value, name) => {
+        if (isRateLimitHeader(name)) res.setHeader(name, value);
+      });
       res.send(data);
     } catch (e: any) {
       logger.error(`Models handler error: ${e.message}`);
       res.status(500).json({ error: { message: e.message, type: 'server_error' } });
     }
   });
+
+  app.get('/codex/models', async (_req, res) => {
+    try {
+      const templates = loadCodexTemplates();
+      const upstream = await fetchModels();
+      upstream.headers.forEach((value, name) => {
+        if (isRateLimitHeader(name)) res.setHeader(name, value);
+      });
+      if (!upstream.ok) {
+        const contentType = upstream.headers.get('content-type');
+        if (contentType) res.setHeader('content-type', contentType);
+        res.status(upstream.status).send(await upstream.text());
+        return;
+      }
+      const { catalog, excluded } = buildCodexCatalog(await upstream.json(), templates);
+      logger.info(`Codex catalog: ${catalog.models.length} models, ${excluded.length} excluded`);
+      logger.debug('Codex catalog exclusions', { excluded });
+      res.json(catalog);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error(`Codex catalog error: ${message}`);
+      res.status(503).json({ error: { message, type: 'catalog_unavailable' } });
+    }
+  });
+
+  app.get('/rate-limits', (_req, res) => res.json(feedback.getRateLimits()));
 
   // --- Stats route ---
   app.get('/stats', (_req, res) => {
