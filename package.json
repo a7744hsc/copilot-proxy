@@ -9,6 +9,7 @@
     "dev": "tsx watch src/index.ts",
     "autostart": "powershell.exe -NoProfile -File scripts\\autostart.ps1",
     "sync:codex": "tsx scripts/sync-codex-catalog.ts",
+    "sync:pi": "tsx scripts/sync-pi-models.ts",
     "test": "tsx --test tests/*.test.ts"
   },
   "dependencies": {

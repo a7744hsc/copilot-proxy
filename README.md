@@ -131,7 +131,7 @@ See [Claude Code integration](docs/claude-code.md) for persistent settings, mode
 
 ## Use with Pi Agent
 
-See [Pi Agent integration](docs/pi-agent.md) for the validated custom provider configuration, supported Claude models, thinking settings, and troubleshooting steps.
+See [Pi Agent integration](docs/pi-agent.md) for the validated custom provider configuration, the `npm run sync:pi` model-list refresh, thinking settings, and troubleshooting steps.
 
 ## Use with Codex CLI
 
